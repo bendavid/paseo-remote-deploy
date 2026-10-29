@@ -1,0 +1,13 @@
+# The daemon that runs the plugin: Paseo from npm, an OpenSSH client and its own ~/.ssh, so the
+# test never touches the developer's SSH configuration or known_hosts.
+FROM docker.io/library/node:22-bookworm-slim
+ARG PASEO_VERSION=0.13.0
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-client ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && npm install -g "@getpaseo/cli@${PASEO_VERSION}" --no-fund --no-audit
+COPY origin-entrypoint.sh /usr/local/bin/origin-entrypoint.sh
+USER node
+WORKDIR /home/node
+EXPOSE 6767
+CMD ["/usr/local/bin/origin-entrypoint.sh"]

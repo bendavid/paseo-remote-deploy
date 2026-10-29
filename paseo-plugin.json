@@ -1,0 +1,9 @@
+{
+  "id": "remote-deploy",
+  "name": "Remote Deploy",
+  "description": "Install a Paseo daemon on another machine over SSH, without root, and add it to this host.",
+  "media": ["assets/screenshot-light.png", "assets/screenshot-dark.png"],
+  "requirements": {
+    "paseo": ">=0.13.0"
+  }
+}

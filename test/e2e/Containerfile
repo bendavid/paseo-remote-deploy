@@ -1,0 +1,15 @@
+# A disposable "remote machine" for end-to-end tests: a non-root user with a password, sshd,
+# curl, tar and cron, and optionally systemd as PID 1. No Node.js, so the plugin has to install it.
+FROM docker.io/library/debian:bookworm
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      systemd systemd-sysv dbus dbus-user-session libpam-systemd polkitd \
+      openssh-server curl ca-certificates tar gzip procps cron \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --create-home --shell /bin/bash dev \
+ && echo 'dev:devpass' | chpasswd \
+ && mkdir -p /run/sshd \
+ && sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config \
+ && systemctl enable ssh
+EXPOSE 22
+CMD ["/sbin/init"]
