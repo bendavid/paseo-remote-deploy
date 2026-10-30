@@ -16,6 +16,7 @@ import {
   defaultLabel,
   emptyDeployForm,
   parseDeployForm,
+  usesRelay,
   type DeployForm,
   type DeployFormField,
 } from "../shared/form";
@@ -124,6 +125,7 @@ export function DeployScreen({ theme, layout, host }: PluginScreenProps) {
     }
   };
 
+  const relayOn = usesRelay(form);
   return (
     <ScrollView
       style={style.scroll}
@@ -186,7 +188,15 @@ export function DeployScreen({ theme, layout, host }: PluginScreenProps) {
                 options={CONNECT_OPTIONS}
                 onValueChange={(value) => set("connectVia", value)}
               />
-              {form.connectVia === "relay" ? (
+              {form.connectVia === "ssh" ? (
+                <SettingsSwitch
+                  label="Enable relay"
+                  hint="Also connect the daemon to an end-to-end encrypted relay, so phones and other apps can pair with it directly, for example with the pairing code shown after the deploy. This daemon still reaches it over SSH."
+                  value={form.enableRelay}
+                  onValueChange={(value) => set("enableRelay", value)}
+                />
+              ) : null}
+              {relayOn ? (
                 <SettingsInput
                   label="Relay address"
                   hint="host:port of a relay you run, such as getpaseo/paseo-relay. Empty uses Paseo's relay. Traffic stays end-to-end encrypted either way."
@@ -196,7 +206,7 @@ export function DeployScreen({ theme, layout, host }: PluginScreenProps) {
                   error={errors.relayEndpoint}
                 />
               ) : null}
-              {form.connectVia === "relay" && form.relayEndpoint.trim() ? (
+              {relayOn && form.relayEndpoint.trim() ? (
                 <SettingsSwitch
                   label="Relay uses TLS"
                   hint="Off only for a relay without TLS in front of it, such as one on a private network."
@@ -204,7 +214,7 @@ export function DeployScreen({ theme, layout, host }: PluginScreenProps) {
                   onValueChange={(value) => set("relayTls", value)}
                 />
               ) : null}
-              {form.connectVia === "relay" && form.relayEndpoint.trim() ? (
+              {relayOn && form.relayEndpoint.trim() ? (
                 <SettingsInput
                   label="Public relay address"
                   hint="Optional. The address clients use, when it differs from the one the remote machine uses."
@@ -214,9 +224,7 @@ export function DeployScreen({ theme, layout, host }: PluginScreenProps) {
                   error={errors.relayPublicEndpoint}
                 />
               ) : null}
-              {form.connectVia === "relay" &&
-              form.relayEndpoint.trim() &&
-              form.relayPublicEndpoint.trim() ? (
+              {relayOn && form.relayEndpoint.trim() && form.relayPublicEndpoint.trim() ? (
                 <SettingsSwitch
                   label="Public address uses TLS"
                   value={form.relayPublicTls}

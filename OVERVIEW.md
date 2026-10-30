@@ -17,9 +17,11 @@ Before anything is downloaded, the plugin lists what it will fetch and from wher
 
 ## SSH or relay
 
-The host is saved as an SSH connection by default. Paseo keeps that link open with `ssh -o BatchMode=yes`, which cannot ask for a password, so it needs SSH key login. The plugin checks this before installing anything. If key login fails, you can cancel, or install and add the host through Paseo's end-to-end encrypted relay instead. Choosing relay up front skips the check: the remote daemon connects out to the relay and no SSH is needed after setup.
+The host is saved as an SSH connection by default. Paseo keeps that link open with `ssh -o BatchMode=yes`, which cannot ask for a password, so it needs SSH key login. The plugin checks this before installing anything. If key login fails, you can cancel, or install and add the host through Paseo's end-to-end encrypted relay instead. Choosing relay up front skips the check: the remote daemon connects out to the relay and no SSH is needed after setup. An SSH deploy can also turn on **Enable relay**: the host is still saved as an SSH connection, and the remote daemon also connects to the relay so other devices can pair with it directly.
 
-In relay mode you can enter a relay you run yourself, such as [paseo-relay](https://github.com/getpaseo/paseo-relay), as `host:port` with or without TLS, plus an optional different address for clients. Before installing anything, the plugin checks that the remote machine and this daemon can both reach it, and asks if either cannot. Leaving the field empty uses Paseo's relay, and redeploying with it empty switches back. Traffic is end-to-end encrypted either way, so the relay only sees encrypted data.
+Whenever the relay is on, you can enter a relay you run yourself, such as [paseo-relay](https://github.com/getpaseo/paseo-relay), as `host:port` with or without TLS, plus an optional different address for clients. Before installing anything, the plugin checks that the remote machine and this daemon can both reach it, and asks if either cannot. Leaving the field empty uses Paseo's relay, and redeploying with it empty switches back. Traffic is end-to-end encrypted either way, so the relay only sees encrypted data.
+
+With the relay on, the machine can also be paired directly with a phone or another app. After the deploy, **Show pairing link** shows a QR code and link that add the machine with its password; nothing is shown until you press it. The link gives full control of that daemon, so share it like the password. The plugin keeps it in memory only while the deploy is listed, and Paseo cannot recover it later because the saved host's password is not readable back. Redeploy for a new one, which also changes the password.
 
 ## Keeping the daemon running
 

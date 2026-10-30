@@ -1,7 +1,14 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { DeployJobs } from "./server/jobs";
 import { resolveNodeRelease } from "./server/node-release";
-import { answerPrompt, cancelDeploy, getJob, listJobs, startDeploy } from "./shared/rpc";
+import {
+  answerPrompt,
+  cancelDeploy,
+  getJob,
+  getPairing,
+  listJobs,
+  startDeploy,
+} from "./shared/rpc";
 
 export default function contribute(server: PluginServerContext) {
   const jobs = new DeployJobs();
@@ -12,6 +19,7 @@ export default function contribute(server: PluginServerContext) {
   }));
   server.handle(listJobs, () => ({ jobs: jobs.list() }));
   server.handle(getJob, ({ jobId }) => ({ job: jobs.get(jobId) }));
+  server.handle(getPairing, ({ jobId }) => ({ pairing: jobs.pairing(jobId) }));
   server.handle(answerPrompt, ({ jobId, promptId, value }) => ({
     accepted: jobs.answer(jobId, promptId, value),
   }));

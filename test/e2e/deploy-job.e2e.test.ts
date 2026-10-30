@@ -1,5 +1,7 @@
 import { parseHostTarget } from "@getpaseo/protocol/host-target";
+import { parseRelayConnectionUri } from "@getpaseo/protocol/daemon-endpoints";
 import { afterAll, beforeAll, expect, test } from "vitest";
+import { decodeQr } from "../qr-decode";
 import { deploy, fakeHosts } from "./deploy";
 import { buildImage, daemonStatus, sshIdentity, startRemote, tunnel, type Remote } from "./remote";
 
@@ -17,7 +19,7 @@ afterAll(async () => {
 test("password login, unknown host key and no SSH key: installs, runs under systemd, adds the host through the relay", async () => {
   const hosts = fakeHosts();
   const sshOptions = await sshIdentity(remote, false);
-  const { job, asked } = await deploy(
+  const { job, asked, pairing } = await deploy(
     { sshPort: remote.port, label: "e2e" },
     {
       sshOptions,
@@ -86,6 +88,21 @@ test("password login, unknown host key and no SSH key: installs, runs under syst
   expect(config).not.toContain(password);
   expect(JSON.stringify(job)).not.toContain(password);
   expect(job.log.join("\n")).not.toContain(password);
+
+  // Asked for, the pairing link is the saved connection in Paseo's #connect= fragment, which the
+  // app reads with its password, and the QR code holds that same link.
+  expect(job.result?.pairing).toBe(true);
+  expect(pairing).not.toBeNull();
+  const link = pairing!.link;
+  expect(link.startsWith("https://app.paseo.sh/#connect=")).toBe(true);
+  expect(decodeURIComponent(link.slice(link.indexOf("#connect=") + "#connect=".length))).toBe(
+    saved.connection,
+  );
+  expect(parseRelayConnectionUri(link)).toMatchObject({
+    offer: { serverId: job.result?.serverId },
+    password,
+  });
+  expect(decodeQr(pairing!.qr.map((row) => [...row].map((cell) => cell === "1")))).toBe(link);
 });
 
 test("redeploying over SSH with key login restarts the daemon and updates the saved host", async () => {
@@ -132,11 +149,37 @@ test("redeploying over SSH with key login restarts the daemon and updates the sa
     forward.close();
   }
 
-  // A second deploy into the same home updates the registration instead of adding another.
+  // Without the relay, an SSH deploy has no pairing link: the app has none for SSH connections.
+  expect(first.job.result?.pairing).toBe(false);
+  expect(first.pairing).toBeNull();
+  expect(JSON.parse(await remote.asDev("cat ~/.paseo/config.json")).daemon.relay.enabled).toBe(
+    false,
+  );
+
+  // A second deploy into the same home updates the registration instead of adding another. With
+  // the relay enabled, the host stays an SSH connection, and the pairing link reaches the daemon
+  // through the relay with its new password.
   const again = await deploy(
-    { sshPort: remote.port, connectVia: "ssh" },
+    { sshPort: remote.port, connectVia: "ssh", enableRelay: true },
     { sshOptions, hosts: hosts.api, answers: { "Restart the running daemon?": "restart" } },
   );
   expect(again.job.status, again.job.error ?? "").toBe("succeeded");
   expect(hosts.calls.map((call) => call.kind)).toEqual(["add", "update"]);
+  const updated = parseHostTarget(hosts.calls.at(-1)!.connection);
+  expect(updated).toMatchObject({ kind: "ssh" });
+  expect(JSON.parse(await remote.asDev("cat ~/.paseo/config.json")).daemon.relay.enabled).toBe(
+    true,
+  );
+  expect(again.job.result?.pairing).toBe(true);
+  const link = again.pairing!.link;
+  const paired = parseRelayConnectionUri(link);
+  expect(paired).toMatchObject({
+    offer: { serverId: again.job.result?.serverId },
+    password: updated.kind === "ssh" ? updated.password : "",
+  });
+  const relayTarget = decodeURIComponent(
+    link.slice(link.indexOf("#connect=") + "#connect=".length),
+  );
+  expect(await daemonStatus(relayTarget)).toMatchObject({ connectedDaemon: "reachable" });
+  expect(decodeQr(again.pairing!.qr.map((row) => [...row].map((cell) => cell === "1")))).toBe(link);
 });

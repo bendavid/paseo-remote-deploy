@@ -29,6 +29,25 @@ export function relayConnection(connectionUri: string, password: string): string
   return url.toString();
 }
 
+const APP_URL = "https://app.paseo.sh";
+
+/**
+ * A link that adds the host with its password, in the app or by scanning: the relay connection in
+ * the `#connect=` fragment of the app address the remote daemon's own pairing link uses.
+ */
+export function pairingLink(connection: string, daemonPairingUrl: string | null): string {
+  let base = APP_URL;
+  try {
+    if (daemonPairingUrl) {
+      const url = new URL(daemonPairingUrl);
+      if (url.protocol === "https:" || url.protocol === "http:") base = url.origin + url.pathname;
+    }
+  } catch {
+    // Paseo's web app, as the daemon uses by default.
+  }
+  return `${base.replace(/\/+$/u, "")}/#connect=${encodeURIComponent(connection)}`;
+}
+
 /**
  * Identifies one deployment among the hosts this plugin saved, so redeploying the same remote
  * home updates its registration instead of adding a second one.

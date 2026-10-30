@@ -1,4 +1,4 @@
-import type { DeployRequest, Job, JobSummary } from "../shared/rpc";
+import type { DeployRequest, Job, JobSummary, Pairing } from "../shared/rpc";
 import { DeployJob, type DeployDependencies } from "./deploy";
 
 /** Each deploy holds an ssh process and possibly a long npm install on the remote machine. */
@@ -32,6 +32,10 @@ export class DeployJobs {
 
   get(jobId: string): Job | null {
     return this.jobs.get(jobId)?.snapshot() ?? null;
+  }
+
+  pairing(jobId: string): Pairing | null {
+    return this.jobs.get(jobId)?.pairing() ?? null;
   }
 
   answer(jobId: string, promptId: string, value: string | null): boolean {

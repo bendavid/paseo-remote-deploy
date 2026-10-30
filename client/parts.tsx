@@ -1,7 +1,7 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon } from "@getpaseo/plugin/client/ui";
-import { useMemo } from "react";
-import { Pressable, Text, View } from "react-native";
+import { type ReactNode, useEffect, useMemo, useRef } from "react";
+import { Animated, Easing, Platform, Pressable, Text, View } from "react-native";
 import type { JobStatus, PromptChoice, Step } from "../shared/rpc";
 
 export function messageOf(error: unknown): string {
@@ -82,7 +82,40 @@ export function stepColor(status: Step["status"], theme: PluginTheme): string {
   }
 }
 
-export function StepRow({ step, theme }: { step: Step; theme: PluginTheme }) {
+/** Turns its child once a second while `spinning`, and rests at its starting angle otherwise. */
+function Spin({ spinning, children }: { spinning: boolean; children: ReactNode }) {
+  const turn = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (!spinning) return;
+    const loop = Animated.loop(
+      Animated.timing(turn, {
+        toValue: 1,
+        duration: 1000,
+        easing: Easing.linear,
+        // React Native Web has no native animation driver.
+        useNativeDriver: Platform.OS !== "web",
+      }),
+    );
+    loop.start();
+    return () => {
+      loop.stop();
+      turn.setValue(0);
+    };
+  }, [spinning, turn]);
+  const rotate = turn.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "360deg"] });
+  return <Animated.View style={{ transform: [{ rotate }] }}>{children}</Animated.View>;
+}
+
+/** `active` spins the running step's icon; it stays still while the deploy waits for an answer. */
+export function StepRow({
+  step,
+  theme,
+  active = false,
+}: {
+  step: Step;
+  theme: PluginTheme;
+  active?: boolean;
+}) {
   const style = useMemo(
     () => ({
       row: { flexDirection: "row" as const, gap: 10, paddingVertical: 6 },
@@ -97,7 +130,9 @@ export function StepRow({ step, theme }: { step: Step; theme: PluginTheme }) {
   );
   return (
     <View style={style.row}>
-      <Icon name={STEP_ICONS[step.status]} size={18} color={stepColor(step.status, theme)} />
+      <Spin spinning={active && step.status === "running"}>
+        <Icon name={STEP_ICONS[step.status]} size={18} color={stepColor(step.status, theme)} />
+      </Spin>
       <View style={style.body}>
         <Text style={style.title}>{step.title}</Text>
         {step.detail ? <Text style={style.detail}>{step.detail}</Text> : null}

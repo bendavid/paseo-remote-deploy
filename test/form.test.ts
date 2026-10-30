@@ -4,6 +4,7 @@ import {
   emptyDeployForm,
   parseDeployForm,
   parseSshDestination,
+  usesRelay,
 } from "../shared/form";
 
 describe("parseSshDestination", () => {
@@ -61,6 +62,7 @@ describe("parseDeployForm", () => {
         daemonPort: null,
         paseoVersion: null,
         service: "auto",
+        enableRelay: false,
         relay: null,
       },
     });
@@ -100,13 +102,41 @@ test("defaultLabel drops the user and IPv6 brackets", () => {
 describe("relay settings", () => {
   const relayForm = { ...emptyDeployForm, destination: "dev@box", connectVia: "relay" as const };
 
-  test("are ignored, even when invalid, unless the host is added through the relay", () => {
+  test("are ignored, even when invalid, unless the relay is on", () => {
     const parsed = parseDeployForm({
       ...relayForm,
       connectVia: "ssh",
       relayEndpoint: "wss://nope",
     });
     expect(parsed.ok && parsed.request.relay).toBeNull();
+  });
+
+  test("an SSH deploy with the relay enabled reads them too", () => {
+    const parsed = parseDeployForm({
+      ...relayForm,
+      connectVia: "ssh",
+      enableRelay: true,
+      relayEndpoint: "relay.example.com:443",
+    });
+    expect(parsed.ok && parsed.request).toMatchObject({
+      connectVia: "ssh",
+      enableRelay: true,
+      relay: { endpoint: "relay.example.com:443", useTls: true },
+    });
+    const invalid = parseDeployForm({
+      ...relayForm,
+      connectVia: "ssh",
+      enableRelay: true,
+      relayEndpoint: "wss://nope",
+    });
+    expect(!invalid.ok && invalid.errors.relayEndpoint).toContain("without wss://");
+  });
+
+  test("the switch only applies to SSH deploys, since a relay deploy always uses the relay", () => {
+    const parsed = parseDeployForm({ ...relayForm, enableRelay: true });
+    expect(parsed.ok && parsed.request.enableRelay).toBe(false);
+    expect(usesRelay({ connectVia: "relay", enableRelay: false })).toBe(true);
+    expect(usesRelay({ connectVia: "ssh", enableRelay: false })).toBe(false);
   });
 
   test("an empty relay address means Paseo's relay", () => {

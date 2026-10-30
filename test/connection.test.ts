@@ -1,6 +1,12 @@
 import { parseHostTarget } from "@getpaseo/protocol/host-target";
 import { describe, expect, test } from "vitest";
-import { deploymentSourceKey, relayConnection, sshConnection } from "../server/connection";
+import { parseRelayConnectionUri } from "@getpaseo/protocol/daemon-endpoints";
+import {
+  deploymentSourceKey,
+  pairingLink,
+  relayConnection,
+  sshConnection,
+} from "../server/connection";
 
 describe("sshConnection", () => {
   // Paseo's own parser is the contract: the saved connection must round-trip through it.
@@ -70,4 +76,37 @@ test("deploymentSourceKey stays within the 256-character limit", () => {
     paseoHome: `/${"x".repeat(400)}`,
   });
   expect(long).toMatch(/^deploy:[0-9a-f]{64}$/u);
+});
+
+describe("pairingLink", () => {
+  const connection = relayConnection(
+    "relay://relay.paseo.sh:443/srv_abc?key=k%2Bey%3D&ssl=true",
+    "Zx_9-password",
+  );
+
+  // The app reads #connect= links with this parser, password included.
+  test("carries the relay connection and password in the app's #connect= fragment", () => {
+    const link = pairingLink(connection, "https://app.paseo.sh/#offer=eyJ2IjoyfQ");
+    expect(link.startsWith("https://app.paseo.sh/#connect=relay%3A%2F%2F")).toBe(true);
+    expect(parseRelayConnectionUri(link)).toEqual({
+      offer: {
+        v: 2,
+        serverId: "srv_abc",
+        daemonPublicKeyB64: "k+ey=",
+        relay: { endpoint: "relay.paseo.sh:443", useTls: true },
+      },
+      password: "Zx_9-password",
+    });
+  });
+
+  test("uses the app address of the remote daemon's own pairing link, or Paseo's web app", () => {
+    expect(pairingLink(connection, "https://paseo.example.com/app/#offer=x")).toMatch(
+      /^https:\/\/paseo\.example\.com\/app\/#connect=/u,
+    );
+    expect(pairingLink(connection, null)).toMatch(/^https:\/\/app\.paseo\.sh\/#connect=/u);
+    expect(pairingLink(connection, "not a url")).toMatch(/^https:\/\/app\.paseo\.sh\/#connect=/u);
+    expect(pairingLink(connection, "javascript:alert(1)")).toMatch(
+      /^https:\/\/app\.paseo\.sh\/#connect=/u,
+    );
+  });
 });

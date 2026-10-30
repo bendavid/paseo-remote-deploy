@@ -28,7 +28,12 @@ export const deployRequestSchema = z.object({
   paseoVersion: z.string().max(64).nullable(),
   service: serviceModeSchema,
   /**
-   * A relay other than Paseo's, used only when the host is added through the relay. `endpoint` is
+   * SSH deploys only: also turn on the remote daemon's relay, so devices can pair with it directly.
+   * A relay deploy always does.
+   */
+  enableRelay: z.boolean().optional(),
+  /**
+   * A relay other than Paseo's, used only when the relay is on. `endpoint` is
    * what the remote daemon connects to; `publicEndpoint`, when set, is what clients are told to use.
    */
   relay: z
@@ -102,6 +107,8 @@ export const jobResultSchema = z.object({
   survivesLogout: z.boolean(),
   startsAtBoot: z.boolean(),
   hostStatus: z.string().nullable(),
+  /** A pairing link with the password can be shown; relay deploys only, while the job is kept. */
+  pairing: z.boolean(),
 });
 export type JobResult = z.infer<typeof jobResultSchema>;
 
@@ -147,6 +154,20 @@ export const answerPrompt = defineRpc({
   name: "deploy.answer",
   input: z.object({ jobId: z.string(), promptId: z.string(), value: z.string().nullable() }),
   output: z.object({ accepted: z.boolean() }),
+});
+
+/** The link holds the daemon password, so it is only sent when someone asks to see it. */
+export const pairingSchema = z.object({
+  link: z.string(),
+  /** QR code rows, "1" for a dark module, without the quiet zone. */
+  qr: z.array(z.string()),
+});
+export type Pairing = z.infer<typeof pairingSchema>;
+
+export const getPairing = defineRpc({
+  name: "deploy.pairing",
+  input: z.object({ jobId: z.string() }),
+  output: z.object({ pairing: pairingSchema.nullable() }),
 });
 
 export const cancelDeploy = defineRpc({

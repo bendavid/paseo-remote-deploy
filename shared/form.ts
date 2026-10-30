@@ -12,7 +12,9 @@ export interface DeployForm {
   daemonPort: string;
   paseoVersion: string;
   service: ServiceMode;
-  /** Relay fields; only read when connectVia is relay. Empty relayEndpoint means Paseo's relay. */
+  /** SSH deploys: also turn on the remote daemon's relay. */
+  enableRelay: boolean;
+  /** Relay fields; only read when the relay is on. Empty relayEndpoint means Paseo's relay. */
   relayEndpoint: string;
   relayTls: boolean;
   relayPublicEndpoint: string;
@@ -20,6 +22,11 @@ export interface DeployForm {
 }
 
 export type DeployFormField = keyof DeployForm;
+
+/** Whether the remote daemon's relay is turned on, which is when the relay fields apply. */
+export function usesRelay(form: Pick<DeployForm, "connectVia" | "enableRelay">): boolean {
+  return form.connectVia === "relay" || form.enableRelay;
+}
 
 export const emptyDeployForm: DeployForm = {
   destination: "",
@@ -32,6 +39,7 @@ export const emptyDeployForm: DeployForm = {
   daemonPort: "",
   paseoVersion: "",
   service: "auto",
+  enableRelay: false,
   relayEndpoint: "",
   relayTls: true,
   relayPublicEndpoint: "",
@@ -152,9 +160,9 @@ export function parseDeployForm(form: DeployForm): ParsedDeployForm {
     errors.paseoVersion = "Use an npm version, range, or tag such as latest or 0.13.0.";
   }
 
-  // Relay fields are hidden, and ignored, unless the host is added through the relay.
+  // Relay fields are hidden, and ignored, unless the relay is on.
   let relay: DeployRequest["relay"] = null;
-  if (form.connectVia === "relay") {
+  if (usesRelay(form)) {
     const endpoint = parseRelayEndpoint(form.relayEndpoint);
     const publicEndpoint = parseRelayEndpoint(form.relayPublicEndpoint);
     if (endpoint && typeof endpoint === "object") errors.relayEndpoint = endpoint.error;
@@ -191,6 +199,7 @@ export function parseDeployForm(form: DeployForm): ParsedDeployForm {
       daemonPort: typeof daemonPort === "number" ? daemonPort : null,
       paseoVersion: paseoVersion || null,
       service: form.service,
+      enableRelay: form.connectVia === "ssh" && form.enableRelay,
       relay,
     },
   };

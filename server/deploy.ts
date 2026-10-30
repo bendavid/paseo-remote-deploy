@@ -9,6 +9,7 @@ import type {
   DeployRequest,
   Job,
   JobResult,
+  Pairing,
   JobStatus,
   JobSummary,
   Prompt,
@@ -18,7 +19,8 @@ import type {
   StepId,
 } from "../shared/rpc";
 import { AskpassBroker, type AskpassRequest } from "./askpass";
-import { deploymentSourceKey, relayConnection, sshConnection } from "./connection";
+import { deploymentSourceKey, pairingLink, relayConnection, sshConnection } from "./connection";
+import { encodeQr } from "./qr";
 import { type NodeRelease, type RemotePlatform } from "./node-release";
 import { renderLauncher, renderUnit, unitName, type DeploymentRecord } from "./remote-files";
 import {
@@ -294,8 +296,18 @@ export class DeployJob {
   private readonly warnings: string[] = [];
   private error: string | null = null;
   private result: JobResult | null = null;
+  /**
+   * The relay connection with the daemon password, as a pairing link. Kept only in memory, for as
+   * long as the job is, and left out of snapshots: it is sent only when someone asks for it.
+   */
+  private pairingLink: string | null = null;
   private readonly log: string[] = [];
   private connectVia: ConnectVia;
+
+  /** A relay deploy, or an SSH deploy that also turns the relay on for directly paired devices. */
+  private get relayEnabled(): boolean {
+    return this.connectVia === "relay" || this.request.enableRelay === true;
+  }
 
   constructor(
     private readonly request: DeployRequest,
@@ -323,6 +335,14 @@ export class DeployJob {
       startedAt: this.startedAt,
       finishedAt: this.finishedAt,
     };
+  }
+
+  pairing(): Pairing | null {
+    if (!this.pairingLink) return null;
+    const qr = encodeQr(this.pairingLink).map((row) =>
+      row.map((dark) => (dark ? "1" : "0")).join(""),
+    );
+    return { link: this.pairingLink, qr };
   }
 
   snapshot(): Job {
@@ -454,7 +474,7 @@ export class DeployJob {
         `${describeInspection(inspection)} The daemon will run as: ${describePlan(plan, unit)}.`,
       );
       if (plan.caveats.length > 0) await this.confirmPlan(plan, "Install anyway");
-      const relay = this.connectVia === "relay" ? (this.request.relay ?? null) : null;
+      const relay = this.relayEnabled ? (this.request.relay ?? null) : null;
       if (relay) await this.checkRelay(session, relay);
 
       begin("node");
@@ -512,7 +532,7 @@ export class DeployJob {
         {
           INSTALL_DIR: inspection.installDir,
           PASEO_HOME: inspection.paseoHome,
-          RELAY_ENABLED: this.connectVia === "relay" ? "true" : "false",
+          RELAY_ENABLED: this.relayEnabled ? "true" : "false",
           RELAY_ENDPOINT: relay?.endpoint ?? "",
           RELAY_USE_TLS: relay?.useTls ? "true" : "false",
           RELAY_PUBLIC_ENDPOINT: relay?.publicEndpoint ?? "",
@@ -538,7 +558,7 @@ export class DeployJob {
         "configure",
         "done",
         `Listens on 127.0.0.1:${daemonPort} with a new random password${
-          this.connectVia !== "relay"
+          !this.relayEnabled
             ? ""
             : relay
               ? `, relay ${relay.endpoint}${relay.publicEndpoint ? ` (clients use ${relay.publicEndpoint})` : ""}`
@@ -557,7 +577,7 @@ export class DeployJob {
         {
           INSTALL_DIR: inspection.installDir,
           PASEO_HOME: inspection.paseoHome,
-          RELAY: this.connectVia === "relay" ? "true" : "false",
+          RELAY: this.relayEnabled ? "true" : "false",
         },
         5 * MINUTE,
       );
@@ -575,6 +595,10 @@ export class DeployJob {
 
       begin("host");
       const label = this.request.label ?? defaultLabel(this.request.destination);
+      // With the relay on, its connection is also what a paired device uses.
+      const relayTarget = this.relayEnabled
+        ? relayConnection(requireValue(ready.values, "connectionUri"), password)
+        : null;
       const connection =
         this.connectVia === "ssh"
           ? sshConnection({
@@ -583,8 +607,11 @@ export class DeployJob {
               daemonPort,
               password,
             })
-          : relayConnection(requireValue(ready.values, "connectionUri"), password);
+          : relayTarget!;
       const saved = await this.saveHost({ connection, label, inspection, serverId, plan, unit });
+      if (relayTarget) {
+        this.pairingLink = pairingLink(relayTarget, nonEmpty(ready.values.get("pairingUrl")));
+      }
       const status = await this.waitForHost(saved.registrationId);
       this.result = {
         connectVia: this.connectVia,
@@ -602,6 +629,7 @@ export class DeployJob {
         survivesLogout: plan.survivesLogout,
         startsAtBoot: plan.startsAtBoot,
         hostStatus: status.status,
+        pairing: this.pairingLink !== null,
       };
       this.finish("succeeded");
     } catch (error) {
@@ -842,7 +870,9 @@ export class DeployJob {
       title: "The relay is not reachable",
       message: [
         ...problems,
-        "The host stays offline until both machines can reach the relay. Check the address, the port and the TLS setting.",
+        this.connectVia === "relay"
+          ? "The host stays offline until both machines can reach the relay. Check the address, the port and the TLS setting."
+          : "The host is added over SSH, but devices paired through the relay cannot connect until both machines can reach it. Check the address, the port and the TLS setting.",
       ].join("\n\n"),
       choices: [
         { value: "continue", label: "Install anyway", tone: "default" },
@@ -1072,7 +1102,7 @@ export class DeployJob {
       "remote-deploy.paseoHome": input.inspection.paseoHome,
       "remote-deploy.installDir": input.inspection.installDir,
       "remote-deploy.service": input.plan.runAs === "systemd" ? input.unit : input.plan.runAs,
-      ...(this.connectVia === "relay" && this.request.relay
+      ...(this.relayEnabled && this.request.relay
         ? {
             "remote-deploy.relay": this.request.relay.publicEndpoint ?? this.request.relay.endpoint,
           }

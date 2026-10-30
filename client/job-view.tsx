@@ -4,6 +4,7 @@ import { ScrollView } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { answerPrompt, cancelDeploy, getJob, type Job, type JobResult } from "../shared/rpc";
+import { PairingModal } from "./pairing-modal";
 import { Button, messageOf, STATUS_LABELS, statusColor, StepRow } from "./parts";
 import { PromptModal } from "./prompt-modal";
 
@@ -76,6 +77,7 @@ export function JobView({
   const answer = useRpc(answerPrompt);
   const cancel = useRpc(cancelDeploy);
   const [showLog, setShowLog] = useState(false);
+  const [showPairing, setShowPairing] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const style = useMemo(
     () => ({
@@ -158,7 +160,7 @@ export function JobView({
 
       <View style={style.card}>
         {job.steps.map((step) => (
-          <StepRow key={step.id} step={step} theme={theme} />
+          <StepRow key={step.id} step={step} theme={theme} active={job.status === "running"} />
         ))}
       </View>
 
@@ -205,6 +207,14 @@ export function JobView({
             }}
           />
         ) : null}
+        {job.result?.pairing ? (
+          <Button
+            label="Show pairing link"
+            tone="default"
+            theme={theme}
+            onPress={() => setShowPairing(true)}
+          />
+        ) : null}
         <Button label="Back" tone="default" theme={theme} onPress={onBack} />
       </View>
 
@@ -223,6 +233,14 @@ export function JobView({
         </View>
       ) : null}
 
+      {showPairing && job.result ? (
+        <PairingModal
+          jobId={jobId}
+          label={job.result.label}
+          theme={theme}
+          onClose={() => setShowPairing(false)}
+        />
+      ) : null}
       {job.prompt ? (
         <PromptModal
           key={job.prompt.id}

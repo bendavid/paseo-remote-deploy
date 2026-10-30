@@ -17,7 +17,8 @@ plugin. Apps connected to that daemon then list the machine as a host.
   background process with a `@reboot` crontab line, or a crontab keep-alive, depending on what the
   machine allows, and asks before installing when none of them would;
 - adds the host over SSH (needs key login) or through Paseo's end-to-end encrypted relay, or a
-  relay you run;
+  relay you run; SSH deploys can turn the relay on as well. With the relay on, a button shows a
+  QR code and link that pair another device with the password included;
 - on a redeploy, moves Paseo to the latest release (or the version you enter) and Node.js to the
   newest 24 release, and warns before any downgrade.
 

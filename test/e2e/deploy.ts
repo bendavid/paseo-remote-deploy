@@ -2,7 +2,7 @@ import type { HostAdd, HostDirectory, HostSummary, HostUpdate } from "@getpaseo/
 import { parseHostTarget } from "@getpaseo/protocol/host-target";
 import { DeployJob, DOWNLOAD_TITLE, type HostsApi } from "../../server/deploy";
 import { resolveNodeRelease } from "../../server/node-release";
-import type { DeployRequest, Job } from "../../shared/rpc";
+import type { DeployRequest, Job, Pairing } from "../../shared/rpc";
 
 /** Records what the deploy saves, and reports every saved host online. */
 export function fakeHosts() {
@@ -50,7 +50,12 @@ export async function deploy(
     /** Deploy another Node.js major than the plugin pins, to exercise upgrades and downgrades. */
     nodeMajor?: number;
   },
-): Promise<{ job: Job; asked: string[]; messages: Record<string, string> }> {
+): Promise<{
+  job: Job;
+  asked: string[];
+  messages: Record<string, string>;
+  pairing: Pairing | null;
+}> {
   const job = new DeployJob(
     {
       destination: "dev@127.0.0.1",
@@ -94,5 +99,6 @@ export async function deploy(
     const { steps, warnings, result, log } = job.snapshot();
     console.log(JSON.stringify({ steps, warnings, result }, null, 2), "\n", log.join("\n"));
   }
-  return { job: job.snapshot(), asked, messages };
+  // What the deploy.pairing RPC would send when someone asks to see the link.
+  return { job: job.snapshot(), asked, messages, pairing: job.pairing() };
 }

@@ -553,5 +553,7 @@ if [ "$RELAY" = true ]; then
   uri=$(printf '%s' "$pair" | field connectionUri)
   [ -n "$uri" ] || fail "The daemon has no relay pairing offer."
   say connectionUri "$uri"
+  # Its pairing link, for the app address it points phones at.
+  say pairingUrl "$(printf '%s' "$pair" | field url)"
 fi
 `;
