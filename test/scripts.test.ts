@@ -11,7 +11,8 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { CHECK_RELAY, INSPECT, RESOLVE_PASEO, SET_CRONTAB } from "../server/remote-scripts";
+import { readInspection } from "../server/deploy";
+import { CHECK_RELAY, INSPECT, PROBE, RESOLVE_PASEO, SET_CRONTAB } from "../server/remote-scripts";
 import { cronTag, renderCronLines } from "../server/service-plan";
 
 function run(script: string, env: Record<string, string>): Map<string, string> {
@@ -33,7 +34,8 @@ test("INSPECT resolves default and ~ paths against the remote HOME", () => {
   expect(defaults.get("installDir")).toBe(`${home}/.local/share/paseo`);
   expect(defaults.get("paseoHome")).toBe(`${home}/.paseo`);
   expect(defaults.get("home")).toBe(home);
-  expect(defaults.get("daemonRunning")).toBeUndefined();
+  expect(defaults.get("lock")).toBeUndefined();
+  expect(defaults.get("config")).toBeUndefined();
 
   const custom = run(INSPECT, {
     HOME: home,
@@ -53,19 +55,49 @@ test("INSPECT resolves default and ~ paths against the remote HOME", () => {
   ).toBe(`${home}/data/paseo`);
 });
 
-test("INSPECT reports a live daemon and the host that holds the lock", () => {
+test("INSPECT sends the lock and deployment record back for the plugin to parse", () => {
   const home = mkdtempSync(join(tmpdir(), "rd-inspect-"));
   mkdirSync(join(home, ".paseo"));
-  writeFileSync(
-    join(home, ".paseo", "paseo.pid"),
-    JSON.stringify({ pid: process.pid, hostname: "other-node", listen: "127.0.0.1:6767" }, null, 2),
-  );
+  const lock = { pid: process.pid, hostname: "other-node", listen: "127.0.0.1:6767" };
+  writeFileSync(join(home, ".paseo", "paseo.pid"), JSON.stringify(lock, null, 2));
   writeFileSync(join(home, ".paseo", "remote-deploy.json"), '{"installDir":"/x","port":7000}\n');
   const values = run(INSPECT, { HOME: home, REQ_INSTALL_DIR: "", REQ_PASEO_HOME: "" });
-  expect(values.get("daemonRunning")).toBe("yes");
-  expect(values.get("lockHostname")).toBe("other-node");
+  expect(JSON.parse(values.get("lock")!)).toEqual(lock);
   expect(values.get("managedHome")).toBe("yes");
   expect(values.get("deployment")).toBe('{"installDir":"/x","port":7000}');
+  expect(readInspection(values)).toMatchObject({
+    lock: { pid: process.pid, hostname: "other-node", startedAt: null, desktopManaged: false },
+    previous: { installDir: "/x", port: 7000 },
+    daemonRunning: false,
+  });
+});
+
+describe("PROBE", () => {
+  function worktree(root: string, project: string, slug: string) {
+    mkdirSync(join(root, project, slug), { recursive: true });
+    writeFileSync(join(root, project, slug, ".git"), "gitdir: /elsewhere\n");
+  }
+
+  test("reports whether the lock's process is alive", () => {
+    expect(run(PROBE, { PID: String(process.pid), WORKTREES_ROOT: "" }).get("daemonRunning")).toBe(
+      "yes",
+    );
+    expect(run(PROBE, { PID: String(2 ** 22 + 7), WORKTREES_ROOT: "" }).has("daemonRunning")).toBe(
+      false,
+    );
+    expect(run(PROBE, { PID: "", WORKTREES_ROOT: "" }).size).toBe(0);
+  });
+
+  test("counts the worktrees in a root: <root>/<project hash>/<slug> with a .git", () => {
+    const root = mkdtempSync(join(tmpdir(), "rd-worktrees-"));
+    worktree(root, "1vnnm9k3", "tidy-fox");
+    worktree(root, "8adkq2mz", "bold-owl");
+    mkdirSync(join(root, "8adkq2mz", "leftover"), { recursive: true });
+    expect(run(PROBE, { PID: "", WORKTREES_ROOT: root }).get("worktreesInRoot")).toBe("2");
+    expect(
+      run(PROBE, { PID: "", WORKTREES_ROOT: join(root, "missing") }).get("worktreesInRoot"),
+    ).toBe("0");
+  });
 });
 
 describe("SET_CRONTAB", () => {
@@ -144,17 +176,15 @@ describe("SET_CRONTAB", () => {
   });
 });
 
-test("INSPECT describes a home another setup left behind", () => {
+test("INSPECT sends back a home another setup left behind, which the plugin parses", () => {
   const home = mkdtempSync(join(tmpdir(), "rd-inspect-"));
   mkdirSync(join(home, ".paseo", "agents", "-home-dev-shop"), { recursive: true });
-  writeFileSync(
-    join(home, ".paseo", "config.json"),
-    JSON.stringify(
-      { daemon: { listen: "127.0.0.1:7000", auth: { password: "$2b$12$hash" } } },
-      null,
-      2,
-    ),
-  );
+  const config = {
+    daemon: { listen: "127.0.0.1:7000", auth: { password: "$2b$12$hash" } },
+    worktrees: { root: " ~/trees ", servicePorts: { range: [4000, 4100] } },
+    providers: { claude: { enabled: true } },
+  };
+  writeFileSync(join(home, ".paseo", "config.json"), JSON.stringify(config, null, 2));
   writeFileSync(join(home, ".paseo", "agents", "-home-dev-shop", "a1.json"), "{}");
   writeFileSync(join(home, ".paseo", "agents", "-home-dev-shop", "a2.json"), "{}");
   // A stale lock from a desktop-managed daemon whose process is gone.
@@ -167,14 +197,30 @@ test("INSPECT describes a home another setup left behind", () => {
     ),
   );
   const values = run(INSPECT, { HOME: home, REQ_INSTALL_DIR: "", REQ_PASEO_HOME: "" });
-  expect(values.get("homeConfigured")).toBe("yes");
-  expect(values.get("homeListen")).toBe("127.0.0.1:7000");
-  expect(values.get("homePassword")).toBe("yes");
+  expect(JSON.parse(values.get("config")!)).toEqual(config);
   expect(values.get("homeAgents")).toBe("2");
-  expect(values.get("lockStartedAt")).toBe("2026-10-20T08:00:00.000Z");
-  expect(values.get("lockDesktopManaged")).toBe("yes");
-  expect(values.get("daemonRunning")).toBeUndefined();
-  expect(values.get("managedHome")).toBeUndefined();
+  expect(readInspection(values)).toMatchObject({
+    homeConfigured: true,
+    homeConfig: { listen: "127.0.0.1:7000", password: true, worktreesRoot: "~/trees" },
+    homeAgents: 2,
+    lock: { pid: 2 ** 22 + 7, startedAt: "2026-10-20T08:00:00.000Z", desktopManaged: true },
+    managedHome: false,
+  });
+});
+
+test("a config.json the plugin cannot parse is reported as such", () => {
+  const home = mkdtempSync(join(tmpdir(), "rd-inspect-"));
+  mkdirSync(join(home, ".paseo"));
+  writeFileSync(join(home, ".paseo", "config.json"), "{ not json");
+  const unreadable = readInspection(
+    run(INSPECT, { HOME: home, REQ_INSTALL_DIR: "", REQ_PASEO_HOME: "" }),
+  );
+  expect(unreadable).toMatchObject({ homeConfigured: true, homeConfig: null });
+  writeFileSync(join(home, ".paseo", "config.json"), '{"daemon":{"listen":6767}}');
+  expect(
+    readInspection(run(INSPECT, { HOME: home, REQ_INSTALL_DIR: "", REQ_PASEO_HOME: "" }))
+      .homeConfig,
+  ).toBeNull();
 });
 
 test("CHECK_RELAY reports a reachable relay and why an unreachable one failed", async () => {

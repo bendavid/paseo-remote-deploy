@@ -184,8 +184,9 @@ export function JobView({
               : ", and nothing starts it again after a reboot."}
           </Text>
           <Text style={style.muted} selectable>
-            Paseo home {job.result.paseoHome}, installed in {job.result.installDir}. The daemon
-            updates itself; run {job.result.installDir}/bin/paseo on the machine for the CLI.
+            Paseo home {job.result.paseoHome}, installed in {job.result.installDir}, worktrees in{" "}
+            {job.result.worktreesRoot}. The daemon updates itself; run {job.result.installDir}
+            /bin/paseo on the machine for the CLI.
           </Text>
         </View>
       ) : null}

@@ -8,6 +8,7 @@ export interface DeployForm {
   connectVia: ConnectVia;
   paseoHome: string;
   installDir: string;
+  worktreesRoot: string;
   daemonPort: string;
   paseoVersion: string;
   service: ServiceMode;
@@ -27,6 +28,7 @@ export const emptyDeployForm: DeployForm = {
   connectVia: "ssh",
   paseoHome: "",
   installDir: "",
+  worktreesRoot: "",
   daemonPort: "",
   paseoVersion: "",
   service: "auto",
@@ -141,6 +143,9 @@ export function parseDeployForm(form: DeployForm): ParsedDeployForm {
   if (paseoHome && typeof paseoHome === "object") errors.paseoHome = paseoHome.error;
   const installDir = parseRemotePath(form.installDir);
   if (installDir && typeof installDir === "object") errors.installDir = installDir.error;
+  const worktreesRoot = parseRemotePath(form.worktreesRoot);
+  if (worktreesRoot && typeof worktreesRoot === "object")
+    errors.worktreesRoot = worktreesRoot.error;
 
   const paseoVersion = form.paseoVersion.trim();
   if (paseoVersion && !/^[0-9A-Za-z.+\-^~<>=*|x ]+$/u.test(paseoVersion)) {
@@ -182,6 +187,7 @@ export function parseDeployForm(form: DeployForm): ParsedDeployForm {
       label: form.label.trim() || null,
       paseoHome: typeof paseoHome === "string" ? paseoHome : null,
       installDir: typeof installDir === "string" ? installDir : null,
+      worktreesRoot: typeof worktreesRoot === "string" ? worktreesRoot : null,
       daemonPort: typeof daemonPort === "number" ? daemonPort : null,
       paseoVersion: paseoVersion || null,
       service: form.service,

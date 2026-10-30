@@ -57,6 +57,7 @@ describe("parseDeployForm", () => {
         label: null,
         paseoHome: null,
         installDir: null,
+        worktreesRoot: null,
         daemonPort: null,
         paseoVersion: null,
         service: "auto",
@@ -77,6 +78,7 @@ describe("parseDeployForm", () => {
       sshPort: "22",
       daemonPort: "0",
       paseoHome: "~/one\ntwo",
+      worktreesRoot: "/srv/one\rtwo",
       paseoVersion: "$(rm -rf ~)",
     });
     expect(parsed.ok).toBe(false);
@@ -85,6 +87,7 @@ describe("parseDeployForm", () => {
       "paseoHome",
       "paseoVersion",
       "sshPort",
+      "worktreesRoot",
     ]);
   });
 });

@@ -481,3 +481,77 @@ test("declining the download question leaves the machine untouched", async () =>
     /No such file/u,
   );
 });
+
+test("the worktree root is written as entered, used by the daemon, and removing or moving it is asked first", async () => {
+  remote = await startRemote({ systemd: true });
+  const sshOptions = await sshIdentity(remote, true);
+  const machine = remote;
+  const hosts = fakeHosts();
+  const cli = "PASEO_HOME=~/.paseo PASEO_REMOTE_DEPLOY_LOGIN=1 ~/.local/share/paseo/bin/paseo";
+  const readConfig = async () =>
+    JSON.parse(await machine.asDev("cat ~/.paseo/config.json")) as {
+      daemon: { listen: string };
+      worktrees?: { root?: string };
+    };
+
+  const first = await deploy(
+    { sshPort: remote.port, worktreesRoot: "~/trees" },
+    { sshOptions, hosts: hosts.api, answers: { "Unknown host key": "yes" } },
+  );
+  expect(first.job.status, first.job.error ?? "").toBe("succeeded");
+  expect(first.messages["Download and install?"]).toMatch(
+    /The worktree root is set to ~\/trees, so new worktrees go in \/home\/dev\/trees\./u,
+  );
+  expect(first.job.result?.worktreesRoot).toBe("/home/dev/trees");
+  expect((await readConfig()).worktrees?.root).toBe("~/trees");
+  // The plugin leaves the directory to Paseo.
+  expect(await machine.asDev("test -e ~/trees && echo exists || echo missing")).toMatch(/missing/u);
+
+  // The daemon expands ~ itself and creates the root with the first worktree.
+  const { daemon } = await readConfig();
+  await machine.asDev(
+    "git init -q -b main ~/repo && git -C ~/repo -c user.name=dev -c user.email=dev@example.com commit -q --allow-empty -m init",
+  );
+  await machine.asDev(
+    `cd ~/repo && ${cli} workspace create --isolation worktree --mode branch-off --new-branch feat --worktree-slug feat --base main --host ${daemon.listen} --json`,
+  );
+  expect((await machine.asDev("ls -d ~/trees/*/feat")).trim()).toMatch(
+    /^\/home\/dev\/trees\/[a-z0-9]+\/feat$/u,
+  );
+
+  // Empty, with the daemon running: the restart question names the removal and the worktree left
+  // behind, and declining it keeps the setting.
+  const declined = await deploy(
+    { sshPort: remote.port },
+    { sshOptions, hosts: hosts.api, answers: { "Restart the running daemon?": "cancel" } },
+  );
+  expect(declined.job.status).toBe("cancelled");
+  expect(declined.messages["Restart the running daemon?"]).toMatch(
+    /The worktree root setting \(~\/trees\) is removed, so new worktrees go in Paseo's default, \/home\/dev\/\.paseo\/worktrees\. The 1 worktree already in \/home\/dev\/trees stays there/u,
+  );
+  expect((await readConfig()).worktrees?.root).toBe("~/trees");
+
+  // With the daemon stopped and nothing to download, the change gets its own question.
+  await machine.asDev(`${cli} daemon stop --home ~/.paseo`);
+  const removed = await deploy(
+    { sshPort: remote.port },
+    { sshOptions, hosts: hosts.api, answers: { "Change the worktree root?": "change" } },
+  );
+  expect(removed.job.status, removed.job.error ?? "").toBe("succeeded");
+  expect(removed.asked).toContain("Change the worktree root?");
+  expect(removed.job.warnings.join("\n")).toMatch(
+    /Worktrees in \/home\/dev\/trees were left there/u,
+  );
+  expect((await readConfig()).worktrees?.root).toBeUndefined();
+  expect(removed.job.result?.worktreesRoot).toBe("/home/dev/.paseo/worktrees");
+
+  // A relative root is written as entered; nothing is in the default root, so only the restart is asked.
+  const relative = await deploy(
+    { sshPort: remote.port, worktreesRoot: "trees" },
+    { sshOptions, hosts: hosts.api, answers: { "Restart the running daemon?": "restart" } },
+  );
+  expect(relative.job.status, relative.job.error ?? "").toBe("succeeded");
+  expect(relative.asked).toEqual(["Restart the running daemon?"]);
+  expect((await readConfig()).worktrees?.root).toBe("trees");
+  expect(relative.job.result?.worktreesRoot).toBe("/home/dev/.paseo/trees");
+});

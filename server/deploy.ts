@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { connect as netConnect, isIP } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
+import { z } from "zod";
 import { defaultLabel } from "../shared/form";
 import type {
   ConnectVia,
@@ -27,6 +28,7 @@ import {
   INSPECT,
   INSTALL_NODE,
   INSTALL_PASEO,
+  PROBE,
   PRUNE_NODE,
   RESOLVE_PASEO,
   PREPARE_SYSTEMD,
@@ -55,6 +57,12 @@ import {
   type ServiceFacts,
   type ServicePlan,
 } from "./service-plan";
+import {
+  confirmsWorktreesRoot,
+  describeWorktreesChange,
+  planWorktreesRoot,
+  type WorktreesRootPlan,
+} from "./worktrees-root";
 import {
   probeKeyLogin,
   RemoteSession,
@@ -122,15 +130,56 @@ interface Inspection {
   managedInstall: boolean;
   managedHome: boolean;
   homeConfigured: boolean;
-  /** What an existing, unmanaged config.json in the home holds. */
-  homeListen: string | null;
-  homePassword: boolean;
+  /** The home's config.json; null when there is none or it could not be parsed. */
+  homeConfig: HomeConfig | null;
   homeAgents: number;
-  lockStartedAt: string | null;
-  lockDesktopManaged: boolean;
+  /** The home's paseo.pid, left by the last daemon that ran there. */
+  lock: DaemonLock | null;
   previous: Partial<DeploymentRecord> | null;
+  /** Whether the lock's process is alive, which PROBE reports once the lock is parsed. */
   daemonRunning: boolean;
-  lockHostname: string | null;
+}
+
+interface HomeConfig {
+  listen: string | null;
+  password: boolean;
+  /** worktrees.root as written; "" when unset. */
+  worktreesRoot: string;
+}
+
+interface DaemonLock {
+  pid: number | null;
+  hostname: string | null;
+  startedAt: string | null;
+  desktopManaged: boolean;
+}
+
+// Only the fields the plugin reads, each optional: any other content in these files is ignored.
+const homeConfigSchema = z.object({
+  daemon: z
+    .object({
+      listen: z.string().optional(),
+      auth: z.object({ password: z.string().optional() }).optional(),
+    })
+    .optional(),
+  worktrees: z.object({ root: z.string().optional() }).optional(),
+});
+
+const lockSchema = z.object({
+  pid: z.number().int().positive().optional(),
+  hostname: z.string().optional(),
+  startedAt: z.string().optional(),
+  desktopManaged: z.boolean().optional(),
+});
+
+function parseJson<T>(raw: string | undefined, schema: z.ZodType<T>): T | null {
+  if (!raw) return null;
+  try {
+    const parsed = schema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
 }
 
 function nonEmpty(value: string | undefined): string | null {
@@ -154,6 +203,8 @@ export function readInspection(values: Map<string, string>): Inspection {
   } catch {
     previous = null;
   }
+  const config = parseJson(values.get("config"), homeConfigSchema);
+  const lock = parseJson(values.get("lock"), lockSchema);
   return {
     platform: {
       os,
@@ -175,14 +226,20 @@ export function readInspection(values: Map<string, string>): Inspection {
     managedInstall: values.get("managedInstall") === "yes",
     managedHome: values.get("managedHome") === "yes",
     homeConfigured: values.get("homeConfigured") === "yes",
-    homeListen: nonEmpty(values.get("homeListen")),
-    homePassword: values.get("homePassword") === "yes",
+    homeConfig: config && {
+      listen: nonEmpty(config.daemon?.listen),
+      password: !!config.daemon?.auth?.password,
+      worktreesRoot: config.worktrees?.root?.trim() ?? "",
+    },
     homeAgents: Number(values.get("homeAgents") ?? 0) || 0,
-    lockStartedAt: nonEmpty(values.get("lockStartedAt")),
-    lockDesktopManaged: values.get("lockDesktopManaged") === "yes",
+    lock: lock && {
+      pid: lock.pid ?? null,
+      hostname: nonEmpty(lock.hostname),
+      startedAt: nonEmpty(lock.startedAt),
+      desktopManaged: lock.desktopManaged === true,
+    },
     previous,
-    daemonRunning: values.get("daemonRunning") === "yes",
-    lockHostname: nonEmpty(values.get("lockHostname")),
+    daemonRunning: false,
   };
 }
 
@@ -328,7 +385,7 @@ export class DeployJob {
       await this.checkKeyLogin(target, options);
 
       begin("inspect");
-      const inspection = readInspection(
+      const inspected = readInspection(
         (
           await session.run(
             INSPECT,
@@ -340,6 +397,32 @@ export class DeployJob {
           )
         ).values,
       );
+      const worktrees = planWorktreesRoot({
+        requested: this.request.worktreesRoot ?? null,
+        // A config.json that could not be parsed leaves the earlier setting unknown.
+        previous: inspected.homeConfig
+          ? inspected.homeConfig.worktreesRoot
+          : inspected.homeConfigured
+            ? null
+            : "",
+        homeDirectory: inspected.homeDirectory,
+        paseoHome: inspected.paseoHome,
+      });
+      const probe = await session.run(
+        PROBE,
+        {
+          PID: inspected.lock?.pid ? String(inspected.lock.pid) : "",
+          WORKTREES_ROOT: worktrees.moves && worktrees.from ? worktrees.from : "",
+        },
+        MINUTE,
+      );
+      const inspection: Inspection = {
+        ...inspected,
+        daemonRunning: probe.values.get("daemonRunning") === "yes",
+      };
+      const stranded = probe.values.has("worktreesInRoot")
+        ? Number(probe.values.get("worktreesInRoot")) || 0
+        : null;
       // Both versions are settled before anything is asked or installed.
       const nodeRelease = await this.deps.resolveNode(inspection.platform);
       const nodePlan = planNodeVersion({
@@ -354,6 +437,8 @@ export class DeployJob {
         inspection,
         versionPlan,
         nodePlan,
+        worktrees,
+        stranded,
         describeDownloads(inspection, nodeRelease, nodePlan, versionPlan),
       );
       if (this.request.service === "systemd" && !inspection.systemd) {
@@ -433,6 +518,8 @@ export class DeployJob {
           RELAY_PUBLIC_ENDPOINT: relay?.publicEndpoint ?? "",
           RELAY_PUBLIC_USE_TLS: relay?.publicUseTls ? "true" : "false",
           REQ_PORT: this.request.daemonPort ? String(this.request.daemonPort) : "",
+          WORKTREES_ROOT_ACTION: worktrees.action ?? "",
+          WORKTREES_ROOT: worktrees.setting,
           DEPLOYMENT: JSON.stringify(deployment),
         },
         2 * MINUTE,
@@ -456,7 +543,7 @@ export class DeployJob {
             : relay
               ? `, relay ${relay.endpoint}${relay.publicEndpoint ? ` (clients use ${relay.publicEndpoint})` : ""}`
               : ", Paseo's relay"
-        }.`,
+        }. Worktrees go in ${worktrees.root}.`,
       );
 
       begin("service");
@@ -505,6 +592,7 @@ export class DeployJob {
         serverId,
         paseoHome: inspection.paseoHome,
         installDir: inspection.installDir,
+        worktreesRoot: worktrees.root,
         paseoVersion: ready.values.get("daemonVersion") ?? paseoVersion,
         nodeVersion,
         service: plan.runAs,
@@ -621,22 +709,28 @@ export class DeployJob {
     inspection: Inspection,
     versionPlan: PaseoVersionPlan,
     nodePlan: NodeVersionPlan,
+    worktrees: WorktreesRootPlan,
+    stranded: number | null,
     downloads: string | null,
   ): Promise<void> {
-    const changes = [describeVersionChange(versionPlan), describeNodeChange(nodePlan)].filter(
-      (part): part is string => part !== null,
-    );
+    const changes = [
+      describeVersionChange(versionPlan),
+      describeNodeChange(nodePlan),
+      describeWorktreesChange(worktrees, stranded),
+    ].filter((part): part is string => part !== null);
+    // Every path below includes the worktree change in what it asks, so this is recorded once.
+    const leftBehind =
+      worktrees.moves && (stranded ?? 0) > 0
+        ? `Worktrees in ${worktrees.from} were left there; Paseo no longer deletes them when their workspaces are archived.`
+        : null;
     const downgrades = [
       versionPlan.change === "downgrade" ? "Paseo" : null,
       nodePlan.change === "downgrade" ? "Node.js" : null,
     ].filter((part): part is string => part !== null);
-    if (
-      inspection.lockHostname &&
-      inspection.hostname &&
-      inspection.lockHostname !== inspection.hostname
-    ) {
+    const lockHostname = inspection.lock?.hostname;
+    if (lockHostname && inspection.hostname && lockHostname !== inspection.hostname) {
       throw new DeployFailedError(
-        `${inspection.paseoHome} belongs to a daemon on ${inspection.lockHostname}; the home ` +
+        `${inspection.paseoHome} belongs to a daemon on ${lockHostname}; the home ` +
           `directory is probably shared between machines. Choose a Paseo home on this machine's ` +
           `own disk, or one per machine.`,
       );
@@ -670,7 +764,19 @@ export class DeployJob {
           ],
         });
         if (choice !== "install") throw new CancelledError();
+      } else if (confirmsWorktreesRoot(worktrees, stranded)) {
+        const choice = await this.ask({
+          kind: "choice",
+          title: WORKTREES_TITLE,
+          message: changes.join("\n\n"),
+          choices: [
+            { value: "change", label: "Change it", tone: "danger" },
+            { value: "cancel", label: "Cancel", tone: "default" },
+          ],
+        });
+        if (choice !== "change") throw new CancelledError();
       }
+      if (leftBehind) this.warnings.push(leftBehind);
       return;
     }
     if (!inspection.managedHome) {
@@ -701,6 +807,7 @@ export class DeployJob {
       ],
     });
     if (choice !== "restart") throw new CancelledError();
+    if (leftBehind) this.warnings.push(leftBehind);
   }
 
   /**
@@ -751,17 +858,19 @@ export class DeployJob {
    * daemon there with settings this deploy replaces, and clients using its old password stop working.
    */
   private async confirmTakeover(inspection: Inspection): Promise<void> {
+    const config = inspection.homeConfig;
     const found = [
-      inspection.homeListen ? `listens on ${inspection.homeListen}` : null,
-      inspection.homePassword ? "has a daemon password" : "has no daemon password",
+      !config ? "has a config.json that could not be read" : null,
+      config?.listen ? `listens on ${config.listen}` : null,
+      config ? (config.password ? "has a daemon password" : "has no daemon password") : null,
       inspection.homeAgents > 0
         ? `holds ${inspection.homeAgents} agent record${inspection.homeAgents === 1 ? "" : "s"}`
         : null,
-      inspection.lockStartedAt ? `last started ${inspection.lockStartedAt}` : null,
+      inspection.lock?.startedAt ? `last started ${inspection.lock.startedAt}` : null,
     ].filter((part): part is string => part !== null);
     const message = [
       `${inspection.paseoHome} already belongs to a Paseo setup this plugin did not create. It ${found.join(", ")}.`,
-      inspection.lockDesktopManaged
+      inspection.lock?.desktopManaged
         ? "Its last daemon was started by the Paseo desktop app, which starts it again when the app opens."
         : null,
       "Continuing keeps its agents, projects and saved hosts, but replaces its listen address, " +
@@ -1109,6 +1218,9 @@ export class DeployJob {
 }
 
 export const DOWNLOAD_TITLE = "Download and install?";
+
+/** Asked when the worktree root changes and no other question already says so. */
+export const WORKTREES_TITLE = "Change the worktree root?";
 
 /**
  * What this deploy fetches and from where, shown before anything is downloaded; null when it

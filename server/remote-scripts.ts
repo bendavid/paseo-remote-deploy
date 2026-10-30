@@ -158,26 +158,31 @@ if [ -x "$install_dir/current/bin/node" ]; then
   fi
 fi
 [ -f "$install_dir/.remote-deploy" ] && say managedInstall yes
+# These JSON files go back whole, for the plugin to parse: JSON strings cannot hold a raw
+# line break, so dropping line breaks keeps the same JSON on one output line.
 if [ -f "$paseo_home/config.json" ]; then
   say homeConfigured yes
-  # What another setup left in this home, for the question asked before taking it over.
-  config=$(tr -d '\n' < "$paseo_home/config.json")
-  say homeListen "$(printf '%s' "$config" | sed -n 's/.*"listen"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-  printf '%s' "$config" | grep -q '"password"' && say homePassword yes
+  say config "$(tr -d '\r\n' < "$paseo_home/config.json")"
   say homeAgents "$(find "$paseo_home/agents" -type f -name '*.json' 2>/dev/null | wc -l | tr -d ' ')"
 fi
 if [ -f "$paseo_home/${DEPLOYMENT_FILE}" ]; then
   say managedHome yes
-  say deployment "$(tr -d '\n' < "$paseo_home/${DEPLOYMENT_FILE}")"
+  say deployment "$(tr -d '\r\n' < "$paseo_home/${DEPLOYMENT_FILE}")"
 fi
-lock="$paseo_home/paseo.pid"
-if [ -f "$lock" ]; then
-  pid=$(tr -d '\n' < "$lock" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
-  lock_host=$(tr -d '\n' < "$lock" | sed -n 's/.*"hostname"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-  say lockHostname "$lock_host"
-  say lockStartedAt "$(tr -d '\n' < "$lock" | sed -n 's/.*"startedAt"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-  tr -d '\n' < "$lock" | grep -q '"desktopManaged"[[:space:]]*:[[:space:]]*true' && say lockDesktopManaged yes
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then say daemonRunning yes; say daemonPid "$pid"; fi
+if [ -f "$paseo_home/paseo.pid" ]; then
+  say lock "$(tr -d '\r\n' < "$paseo_home/paseo.pid")"
+fi
+`;
+
+/**
+ * Inputs: PID (from the lock INSPECT sent back, or empty), WORKTREES_ROOT (a resolved root whose
+ * worktrees to count, or empty). The follow-up to INSPECT once the plugin has parsed its files.
+ */
+export const PROBE = String.raw`${PRELUDE}
+if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then say daemonRunning yes; fi
+# <root>/<project hash>/<slug>/.git
+if [ -n "$WORKTREES_ROOT" ]; then
+  say worktreesInRoot "$(find "$WORKTREES_ROOT" -mindepth 3 -maxdepth 3 -name .git 2>/dev/null | wc -l | tr -d ' ')"
 fi
 `;
 
@@ -338,7 +343,8 @@ fi
 
 /**
  * Inputs: INSTALL_DIR, PASEO_HOME, RELAY_ENABLED, RELAY_* (see below), REQ_PORT (empty to keep the
- * configured port or pick one), DEPLOYMENT (the JSON for ${DEPLOYMENT_FILE}, without the port).
+ * configured port or pick one), WORKTREES_ROOT_ACTION (set, unset or empty to leave it) and
+ * WORKTREES_ROOT, DEPLOYMENT (the JSON for ${DEPLOYMENT_FILE}, without the port).
  * Reports the port and a newly generated daemon password.
  */
 export const CONFIGURE = String.raw`${PRELUDE}
@@ -394,6 +400,15 @@ else
       || fail "Could not clear daemon.relay.$field."
   done
 fi
+# As entered: Paseo resolves ~ and relative paths itself, and creates the directory when needed.
+case "$WORKTREES_ROOT_ACTION" in
+  set)
+    paseo daemon config set worktrees.root "$WORKTREES_ROOT" --string --home "$PASEO_HOME" >/dev/null \
+      || fail "Could not set worktrees.root." ;;
+  unset)
+    paseo daemon config unset worktrees.root --home "$PASEO_HOME" >/dev/null \
+      || fail "Could not remove worktrees.root." ;;
+esac
 # What paseo daemon set-password does, without its terminal prompt, using Paseo's own exports:
 # a new random password, hashed by Paseo and saved to config.json (mode 0600). The password only
 # exists in this process and its output, which goes back over SSH; never in argv, env or a file.

@@ -39,15 +39,15 @@ Open **Remote Deploy** in the sidebar footer or from the Command Center.
 
 ## What it changes on the remote machine
 
-| Path or setting                                                          | Purpose                                                                               |
-| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
-| `~/.local/share/paseo/node-v24.*`                                        | Node.js, which is also the npm prefix Paseo is installed into and self-updates in     |
-| `~/.local/share/paseo/current`, `bin/paseo`                              | The Node.js in use, and a launcher that runs the CLI with it through your login shell |
-| `~/.paseo/config.json`, `remote-deploy.json`                             | Listen address, password hash, relay settings; the plugin's record of the deployment  |
-| `~/.config/systemd/user/paseo-daemon*.service`, `loginctl enable-linger` | The user service, when systemd is used                                                |
-| Crontab lines tagged `#[paseo-remote-deploy:…]`                          | `@reboot` start or keep-alive, when cron is used; other lines are never touched       |
+| Path or setting                                                          | Purpose                                                                                                |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `~/.local/share/paseo/node-v24.*`                                        | Node.js, which is also the npm prefix Paseo is installed into and self-updates in                      |
+| `~/.local/share/paseo/current`, `bin/paseo`                              | The Node.js in use, and a launcher that runs the CLI with it through your login shell                  |
+| `~/.paseo/config.json`, `remote-deploy.json`                             | Listen address, password hash, relay and worktree root settings; the plugin's record of the deployment |
+| `~/.config/systemd/user/paseo-daemon*.service`, `loginctl enable-linger` | The user service, when systemd is used                                                                 |
+| Crontab lines tagged `#[paseo-remote-deploy:…]`                          | `@reboot` start or keep-alive, when cron is used; other lines are never touched                        |
 
-Both directories can be changed in the form. The plugin refuses a Paseo home used by a daemon it
+Both directories, and the worktree root, can be changed in the form. The plugin refuses a Paseo home used by a daemon it
 did not install, and asks before taking over one that another setup configured.
 
 ## Develop

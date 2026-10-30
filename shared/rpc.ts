@@ -17,6 +17,11 @@ export const deployRequestSchema = z.object({
   /** Remote paths; `~` is the remote home. Null uses the defaults. */
   paseoHome: z.string().max(1024).nullable(),
   installDir: z.string().max(1024).nullable(),
+  /**
+   * Paseo's `worktrees.root` on the remote, written as entered: Paseo reads `~` as the remote home
+   * and a relative path as inside the Paseo home. Null removes it, so Paseo's default applies.
+   */
+  worktreesRoot: z.string().max(1024).nullable().optional(),
   /** Remote loopback port for the daemon. Null keeps an earlier deploy's port, else picks one. */
   daemonPort: z.number().int().min(1).max(65535).nullable(),
   /** An npm version or tag of @getpaseo/cli. Null installs latest. */
@@ -85,6 +90,8 @@ export const jobResultSchema = z.object({
   serverId: z.string().nullable(),
   paseoHome: z.string(),
   installDir: z.string(),
+  /** Where the daemon creates worktrees, resolved. */
+  worktreesRoot: z.string(),
   paseoVersion: z.string().nullable(),
   nodeVersion: z.string().nullable(),
   /** systemd: user service; background: detached; cron: started by a keep-alive crontab line. */

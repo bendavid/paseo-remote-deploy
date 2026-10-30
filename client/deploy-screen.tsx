@@ -244,6 +244,14 @@ export function DeployScreen({ theme, layout, host }: PluginScreenProps) {
                 onChangeText={(text) => set("installDir", text)}
                 error={errors.installDir}
               />
+              <SettingsInput
+                label="Worktree root"
+                hint="Where agents' git worktrees go, saved to Paseo's worktrees.root as entered: ~ is the remote home and a relative path is inside the Paseo home. Empty uses Paseo's default, worktrees in the Paseo home. A redeploy that changes or removes an earlier setting asks first; existing worktrees stay where they are."
+                placeholder="Paseo's default"
+                initialValue={form.worktreesRoot}
+                onChangeText={(text) => set("worktreesRoot", text)}
+                error={errors.worktreesRoot}
+              />
               <SettingsSelect
                 label="Run the daemon as"
                 hint="Automatic checks the machine first and picks what keeps the daemon running after you log out and after a reboot: a systemd user service with linger, else a background process that cron starts again. You are asked before installing if neither works."

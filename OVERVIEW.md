@@ -36,6 +36,7 @@ If the result would stop at logout or not come back after a reboot, the plugin s
 
 - **Paseo home**: daemon state and config, `~/.paseo` by default. `~` is the remote home directory.
 - **Install directory**: Node.js and Paseo, `~/.local/share/paseo` by default. Its `bin/paseo` runs the CLI.
+- **Worktree root**: where the daemon creates agents' git worktrees, saved to `worktrees.root` as entered. Paseo reads `~` as the remote home and a relative path as inside the Paseo home. Empty uses Paseo's default, `worktrees` in the Paseo home, so a redeploy with it empty removes an earlier setting. A redeploy asks before changing or removing an earlier setting, even to another spelling of the same directory. Paseo only deletes worktrees under its current root when their workspaces are archived, so a root in another directory leaves existing worktrees in place, and the question says how many.
 - **Run the daemon as**: automatic, systemd user service, or background process. An explicit choice is honoured, with its consequences shown before installing.
 - **Daemon port** and **Paseo version**: leave empty for the defaults.
 
