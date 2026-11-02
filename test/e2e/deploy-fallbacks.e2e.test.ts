@@ -555,3 +555,39 @@ test("the worktree root is written as entered, used by the daemon, and removing 
   expect((await readConfig()).worktrees?.root).toBe("trees");
   expect(relative.job.result?.worktreesRoot).toBe("/home/dev/.paseo/trees");
 });
+
+test("an old system Node.js ahead on PATH does not shadow the plugin's for the daemon, its CLI and npm", async () => {
+  remote = await startRemote({ systemd: true });
+  // Stand-ins for an ancient distribution Node.js and npm, first on every login PATH.
+  await remote.asRoot(
+    [
+      "printf '%s\\n' '#!/bin/sh' 'case \"$1\" in -v|--version) echo v6.17.1; exit 0;; esac' 'echo \"SyntaxError: Unexpected token (old node)\" >&2; exit 1' > /usr/local/bin/node",
+      "printf '%s\\n' '#!/bin/sh' 'case \"$1\" in -v|--version) echo 3.10.10; exit 0;; esac' 'echo \"npm ERR! old npm\" >&2; exit 1' > /usr/local/bin/npm",
+      "chmod 755 /usr/local/bin/node /usr/local/bin/npm",
+    ].join(" && "),
+  );
+  expect((await remote.asDev("bash -lc 'node -v'")).trim()).toBe("v6.17.1");
+
+  const sshOptions = await sshIdentity(remote, true);
+  const { job } = await deploy(
+    { sshPort: remote.port },
+    { sshOptions, hosts: fakeHosts().api, answers: { "Unknown host key": "yes" } },
+  );
+  expect(job.status, job.error ?? "").toBe("succeeded");
+
+  // Commands run with the daemon's own environment, as plugins, agents and self-update get it.
+  const { pid } = await localStatus(remote);
+  const inDaemonEnv = (command: string) =>
+    remote!.asDev(
+      `env -i HOME=/home/dev PATH="$(tr '\\0' '\\n' < /proc/${String(pid)}/environ | sed -n 's/^PATH=//p')" sh -c '${command}'`,
+    );
+  expect((await inDaemonEnv("node -v")).trim()).toMatch(/^v24\./u);
+  expect((await inDaemonEnv("npm -v")).trim()).toMatch(/^11\./u);
+  // What Paseo Cafe runs to read the plugin inventory.
+  const plugins = JSON.parse(await inDaemonEnv("paseo plugin ls --json"));
+  expect(Array.isArray(plugins) || typeof plugins === "object").toBe(true);
+  // The login PATH is still there after the plugin's Node.js.
+  expect(await inDaemonEnv('echo "$PATH"')).toMatch(
+    /^\/home\/dev\/\.local\/share\/paseo\/current\/bin:.*\/usr\/local\/bin/u,
+  );
+});

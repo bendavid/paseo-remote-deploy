@@ -21,18 +21,18 @@ function fakeInstall(): string {
 }
 
 describe("renderLauncher", () => {
-  test("runs the CLI with its own node and appends that node to PATH", () => {
+  test("runs the CLI with its own node and puts that node first on PATH", () => {
     const dir = fakeInstall();
     const output = execFileSync(join(dir, "bin", "paseo"), ["daemon", "run", "--home", "/h o/me"], {
       env: { PATH: "/usr/bin:/bin", PASEO_REMOTE_DEPLOY_LOGIN: "1" },
       encoding: "utf8",
     });
     expect(output).toBe(
-      `${dir}/current/lib/node_modules/@getpaseo/cli/bin/paseo|daemon|run|--home|/h o/me|PATH=/usr/bin:/bin:${dir}/current/bin\n`,
+      `${dir}/current/lib/node_modules/@getpaseo/cli/bin/paseo|daemon|run|--home|/h o/me|PATH=${dir}/current/bin:/usr/bin:/bin\n`,
     );
   });
 
-  test("re-enters the login shell first so agents see the user's PATH", () => {
+  test("re-enters the login shell first so agents see the user's PATH, after its own node", () => {
     const dir = fakeInstall();
     const home = mkdtempSync(join(tmpdir(), "rd-home-"));
     // The launcher uses the account's shell from the password database, as cron sets SHELL=/bin/sh.
@@ -45,7 +45,7 @@ describe("renderLauncher", () => {
     });
     expect(output).toMatch(
       new RegExp(
-        `\\|PATH=/opt/from-profile:.*:${dir.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}/current/bin\\n$`,
+        `\\|PATH=${dir.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}/current/bin:/opt/from-profile:`,
         "u",
       ),
     );

@@ -5,8 +5,10 @@ import { OWNER_MARKER } from "./remote-scripts";
 /**
  * `<installDir>/bin/paseo`: runs the CLI with the plugin's Node.js. The daemon's agents inherit
  * its environment, so the launcher first re-enters the user's login shell to pick up their PATH,
- * then appends Paseo's Node.js directory. That keeps the user's own `node` first for agents while
- * the daemon's self-update can still find `npm` when the machine has none.
+ * then puts Paseo's Node.js directory first. Everything the daemon starts by name runs on it:
+ * `paseo` and `npm` are `#!/usr/bin/env node` scripts, so behind an older system `node` the CLI
+ * that plugins call and the daemon's self-update would fail. Agents and terminals get that
+ * Node.js first too, unless their shell's startup files reorder PATH.
  *
  * PASEO_REMOTE_DEPLOY_LOGIN=1 skips the login shell, for the plugin's own scripted calls.
  */
@@ -28,7 +30,7 @@ export function renderLauncher(installDir: string): string {
     "  esac",
     "fi",
     "unset PASEO_REMOTE_DEPLOY_LOGIN",
-    'if [ -n "$PATH" ]; then PATH="$PATH:$install_dir/current/bin"; else PATH="$install_dir/current/bin"; fi',
+    'if [ -n "$PATH" ]; then PATH="$install_dir/current/bin:$PATH"; else PATH="$install_dir/current/bin"; fi',
     "export PATH",
     'exec "$install_dir/current/bin/node" "$install_dir/current/lib/node_modules/@getpaseo/cli/bin/paseo" "$@"',
   ].join("\n");

@@ -9,7 +9,8 @@ On the remote machine it:
 - downloads the newest Node.js 24 for that platform from nodejs.org and checks its published SHA-256, using the glibc 2.17 build on older x64 Linux systems;
 - installs `@getpaseo/cli` into that Node.js directory using npm, so the daemon's own self-update keeps working;
 - generates a random daemon password on the remote machine with Paseo's own code, which stores only its hash, and picks a loopback port, 6767 when free. The password comes back over SSH and is never placed in a command line, environment variable or file on the remote;
-- starts the daemon so it keeps running after you log out and starts again after a reboot (see below).
+- starts the daemon with your login shell's `PATH`, with that Node.js first, so the Paseo CLI, npm and plugins never run on an older system Node.js. Agents and terminals inherit it too, unless your shell's startup files reorder `PATH`;
+- keeps the daemon running after you log out and starts it again after a reboot (see below).
 
 Then it saves the host, with its password, on the daemon running the plugin. Connected apps list it as a host of that daemon.
 

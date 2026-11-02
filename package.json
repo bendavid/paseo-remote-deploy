@@ -1,7 +1,7 @@
 {
   "name": "paseo-remote-deploy",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Install a Paseo daemon on another machine over SSH, without root, and add it to this host.",
   "license": "MIT",
   "type": "module",
