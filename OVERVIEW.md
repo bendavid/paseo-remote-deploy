@@ -45,7 +45,7 @@ Each deployment gets a random ID at its first deploy, kept in the Paseo home's `
 - **Run the daemon as**: automatic, systemd user service, or background process. An explicit choice is honoured, with its consequences shown before installing.
 - **Daemon port** and **Paseo version**: leave empty for the defaults.
 
-Redeploying the same machine and home brings Node.js to the newest 24 release and Paseo to the latest release, or to the version you enter, reinstalling Paseo whenever Node.js changes. It says what changes, asks before restarting a running daemon, gives it a new password and updates the saved host. A lower Paseo version than the installed one is only installed after a warning, because Paseo's data has no migrations. The previous Node.js folder is removed once the daemon runs on the new one.
+Redeploying the same machine and home brings Node.js to the newest 24 release and Paseo to the latest release, or to the version you enter, reinstalling Paseo whenever Node.js changes. It says what changes, asks before restarting a running daemon, gives it a new password and updates the saved host. The saved host belongs to the deployment, so reaching the same machine under another name, such as a load-balanced alias and then the node's own name, updates the same host. If the daemon is already saved by hand or by another tool, the plugin asks before deploying whether to replace that registration, since the new password stops it working anyway. A lower Paseo version than the installed one is only installed after a warning, because Paseo's data has no migrations. The previous Node.js folder is removed once the host is saved; if that fails or takes too long, the deploy only warns.
 
 ## Requirements and limits
 

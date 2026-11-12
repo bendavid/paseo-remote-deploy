@@ -4,40 +4,63 @@ import { DeployJob, DOWNLOAD_TITLE, type HostsApi } from "../../server/deploy";
 import { resolveNodeRelease } from "../../server/node-release";
 import type { DeployRequest, Job, Pairing } from "../../shared/rpc";
 
-/** Records what the deploy saves, and reports every saved host online. */
+/**
+ * Records what the deploy saves, and reports every saved host online. `seed` adds a registration
+ * as another source would have made it; `hosts` is the registry's current content.
+ */
 export function fakeHosts() {
   const hosts: HostSummary[] = [];
-  const calls: { kind: "add" | "update"; connection: string }[] = [];
+  const calls: { kind: "add" | "update" | "remove"; connection: string; registrationId: string }[] =
+    [];
+  let next = 1;
+  const create = (input: HostAdd & { serverId?: string | null; sourceId?: string }) => {
+    const host: HostSummary = {
+      registrationId: `reg_${next++}`,
+      serverId: input.serverId ?? null,
+      label: input.label ?? null,
+      source: { id: input.sourceId ?? "plugin:remote-deploy", key: input.sourceKey ?? "" },
+      metadata: input.metadata ?? {},
+      enabled: true,
+      status: "online",
+      targetDescription: parseHostTarget(input.connection).description,
+      lastOnlineAt: null,
+      nextRetryAt: null,
+      error: null,
+    };
+    hosts.push(host);
+    return host;
+  };
   const api: HostsApi = {
     async list(): Promise<HostDirectory> {
       return { self: { serverId: "srv_origin", label: "origin" }, hosts: [...hosts] };
     },
     async add(input: HostAdd): Promise<HostSummary> {
-      calls.push({ kind: "add", connection: input.connection });
-      const host: HostSummary = {
-        registrationId: `reg_${hosts.length + 1}`,
-        serverId: null,
-        label: input.label ?? null,
-        source: { id: "plugin:remote-deploy", key: input.sourceKey ?? "" },
-        metadata: input.metadata ?? {},
-        enabled: true,
-        status: "online",
-        targetDescription: parseHostTarget(input.connection).description,
-        lastOnlineAt: null,
-        nextRetryAt: null,
-        error: null,
-      };
-      hosts.push(host);
+      const host = create(input);
+      calls.push({
+        kind: "add",
+        connection: input.connection,
+        registrationId: host.registrationId,
+      });
       return host;
     },
     async update(registrationId: string, patch: HostUpdate): Promise<HostSummary> {
-      calls.push({ kind: "update", connection: patch.connection ?? "" });
+      calls.push({ kind: "update", connection: patch.connection ?? "", registrationId });
       const host = hosts.find((candidate) => candidate.registrationId === registrationId)!;
-      Object.assign(host, { label: patch.label ?? host.label });
+      Object.assign(host, {
+        label: patch.label ?? host.label,
+        metadata: patch.metadata ?? host.metadata,
+      });
       return host;
     },
+    async remove(registrationId: string): Promise<void> {
+      calls.push({ kind: "remove", connection: "", registrationId });
+      hosts.splice(
+        hosts.findIndex((candidate) => candidate.registrationId === registrationId),
+        1,
+      );
+    },
   };
-  return { api, calls };
+  return { api, calls, hosts, seed: create };
 }
 
 /** Runs a deploy, answering its questions the way a person in the app would. */

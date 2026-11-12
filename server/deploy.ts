@@ -23,6 +23,7 @@ import { deploymentSourceKey, pairingLink, relayConnection, sshConnection } from
 import { encodeQr } from "./qr";
 import { type NodeRelease, type RemotePlatform } from "./node-release";
 import { planIdentity, type IdentityPlan } from "./deployment-identity";
+import { DEPLOYMENT_METADATA, deploymentKey, planRegistration } from "./host-registration";
 import {
   newDeploymentId,
   readUnit,
@@ -84,7 +85,10 @@ import {
 } from "./ssh";
 
 // Host types come through the plugin SDK: @getpaseo/client is not a module plugins can import.
-export type HostsApi = Pick<PluginHandlerContext["paseo"]["hosts"], "list" | "add" | "update">;
+export type HostsApi = Pick<
+  PluginHandlerContext["paseo"]["hosts"],
+  "list" | "add" | "update" | "remove"
+>;
 type HostSummary = Awaited<ReturnType<HostsApi["list"]>>["hosts"][number];
 
 export interface DeployDependencies {
@@ -155,6 +159,8 @@ interface Inspection {
   machineIdTransient: boolean;
   /** This plugin's units in the user's unit directory, from any deploy and any machine. */
   units: UnitFacts[];
+  /** $PASEO_HOME/server-id: the daemon's identity, kept across restarts; null for a new home. */
+  homeServerId: string | null;
 }
 
 interface HomeConfig {
@@ -261,6 +267,9 @@ export function readInspection(values: Map<string, string>): Inspection {
       ? values.get("machineId")!
       : null,
     machineIdTransient: values.get("machineIdTransient") === "yes",
+    homeServerId: /^srv_[A-Za-z0-9_-]+$/u.test(values.get("serverId") ?? "")
+      ? values.get("serverId")!
+      : null,
     units: (values.get("units") ?? "")
       .split("\u001e")
       .filter((entry) => entry.includes("\u001f"))
@@ -327,6 +336,8 @@ export class DeployJob {
    * long as the job is, and left out of snapshots: it is sent only when someone asks for it.
    */
   private pairingLink: string | null = null;
+  /** Registrations made outside this plugin that the user agreed to replace. */
+  private readonly replaceApproved = new Set<string>();
   private readonly log: string[] = [];
   private connectVia: ConnectVia;
 
@@ -496,6 +507,9 @@ export class DeployJob {
         target: nodeRelease.version,
       });
       const versionPlan = await this.planVersion(session, inspection);
+      // Before anything is downloaded: a registration this plugin did not make is replaced only if
+      // the user agrees.
+      await this.checkRegistrations(inspection, identity.id);
       await this.checkExistingDaemon(
         inspection,
         versionPlan,
@@ -678,7 +692,15 @@ export class DeployJob {
               password,
             })
           : relayTarget!;
-      const saved = await this.saveHost({ connection, label, inspection, serverId, plan, unit });
+      const saved = await this.saveHost({
+        connection,
+        label,
+        inspection,
+        serverId,
+        plan,
+        unit,
+        deploymentId: identity.id,
+      });
       if (relayTarget) {
         this.pairingLink = pairingLink(relayTarget, nonEmpty(ready.values.get("pairingUrl")));
       }
@@ -1231,6 +1253,64 @@ export class DeployJob {
     return true;
   }
 
+  /** The source key of registrations from before deployment IDs. */
+  private legacyKey(inspection: Inspection): string {
+    return deploymentSourceKey({
+      destination: this.request.destination,
+      sshPort: this.request.sshPort,
+      paseoHome: inspection.paseoHome,
+    });
+  }
+
+  private async checkRegistrations(inspection: Inspection, deploymentId: string): Promise<void> {
+    if (!inspection.homeServerId) return;
+    const directory = await this.deps.hosts.list();
+    const plan = planRegistration({
+      hosts: directory.hosts,
+      deploymentId,
+      legacyKey: this.legacyKey(inspection),
+      serverId: inspection.homeServerId,
+    });
+    if (plan.conflicts.length > 0) await this.confirmReplace(inspection, plan.conflicts, "before");
+  }
+
+  /**
+   * One registration per daemon: a registration this plugin did not make, for the same daemon, is
+   * replaced only after asking. Asked before deploying when the home already has a server ID, and
+   * again at saving for any the first check could not see.
+   */
+  private async confirmReplace(
+    inspection: Inspection,
+    conflicts: readonly HostSummary[],
+    when: "before" | "after",
+  ): Promise<void> {
+    const names = conflicts
+      .map((host) => `"${host.label ?? host.targetDescription}" (${host.targetDescription})`)
+      .join(", ");
+    const choice = await this.ask({
+      kind: "choice",
+      title: "This daemon is already saved",
+      message: [
+        `The daemon in ${inspection.paseoHome} on ${inspection.hostname} is already saved on this daemon as ${names}, which this plugin did not create. Only one registration can use a daemon.`,
+        `This deploy gives the daemon a new password, so that registration stops working either way.`,
+        when === "before"
+          ? "Replacing removes it when the deploy saves this deployment's host. Cancelling leaves the machine and the registration as they are."
+          : "Replacing removes it and saves this deployment's host. Otherwise the daemon keeps running, but no host is saved for it.",
+      ].join("\n\n"),
+      choices: [
+        { value: "replace", label: "Replace it", tone: "danger" },
+        { value: "cancel", label: "Cancel", tone: "default" },
+      ],
+    });
+    if (choice !== "replace") {
+      if (when === "before") throw new CancelledError();
+      throw new DeployFailedError(
+        `The daemon runs, but its host was not saved: ${names} already has it. Remove that registration and deploy again.`,
+      );
+    }
+    for (const host of conflicts) this.replaceApproved.add(host.registrationId);
+  }
+
   private async saveHost(input: {
     connection: string;
     label: string;
@@ -1238,13 +1318,10 @@ export class DeployJob {
     serverId: string | null;
     plan: ServicePlan;
     unit: string;
+    deploymentId: string;
   }): Promise<HostSummary> {
-    const sourceKey = deploymentSourceKey({
-      destination: this.request.destination,
-      sshPort: this.request.sshPort,
-      paseoHome: input.inspection.paseoHome,
-    });
     const metadata = {
+      [DEPLOYMENT_METADATA]: input.deploymentId,
       "remote-deploy.destination": this.request.destination,
       "remote-deploy.paseoHome": input.inspection.paseoHome,
       "remote-deploy.installDir": input.inspection.installDir,
@@ -1256,7 +1333,26 @@ export class DeployJob {
         : {}),
     };
     const directory = await this.deps.hosts.list();
-    const existing = directory.hosts.find((host) => host.source.key === sourceKey);
+    const plan = planRegistration({
+      hosts: directory.hosts,
+      deploymentId: input.deploymentId,
+      legacyKey: this.legacyKey(input.inspection),
+      serverId: input.serverId ?? input.inspection.homeServerId,
+    });
+    const unapproved = plan.conflicts.filter(
+      (host) => !this.replaceApproved.has(host.registrationId),
+    );
+    if (unapproved.length > 0) await this.confirmReplace(input.inspection, unapproved, "after");
+    // Removed first: the registration this deploy keeps cannot take a daemon another one owns.
+    for (const host of [...plan.removeOwn, ...plan.conflicts]) {
+      await this.deps.hosts.remove(host.registrationId);
+      this.appendLog(
+        `Removed the registration "${host.label ?? host.targetDescription}" (${host.targetDescription})${
+          plan.removeOwn.includes(host) ? ", an earlier one of this deployment" : ""
+        }.`,
+      );
+    }
+    const existing = plan.update;
     try {
       if (existing) {
         const saved = await this.deps.hosts.update(existing.registrationId, {
@@ -1277,13 +1373,15 @@ export class DeployJob {
         connection: input.connection,
         label: input.label,
         metadata,
-        sourceKey,
+        sourceKey: deploymentKey(input.deploymentId),
       });
       this.appendLog(`Saved the host ${saved.label ?? input.label}.`);
       return saved;
     } catch (error) {
       if (errorCode(error) === "duplicate_host") {
-        const other = directory.hosts.find((host) => host.serverId === input.serverId);
+        const other = (await this.deps.hosts.list()).hosts.find(
+          (host) => host.serverId === input.serverId,
+        );
         throw new DeployFailedError(
           `This daemon is already saved${other ? ` as "${other.label ?? other.targetDescription}"` : ""}. ` +
             `Remove that host, then deploy again.`,

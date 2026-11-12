@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { parseHostTarget } from "@getpaseo/protocol/host-target";
 import { afterEach, beforeAll, expect, test } from "vitest";
+import { deploymentSourceKey } from "../../server/connection";
 import { deploy, fakeHosts } from "./deploy";
 import {
   buildImage,
@@ -723,4 +724,98 @@ test("an old Node.js folder that cannot be removed only warns, after the host is
   expect(again.job.warnings.join("\n")).toMatch(
     /Could not remove the previous Node\.js folders in \/home\/dev\/\.local\/share\/paseo: +node-v1\.0\.0-linux-x64\. They only take up space/u,
   );
+});
+
+test("registrations follow the deployment: earlier ones under other names are adopted, and one made elsewhere is replaced only after asking first", async () => {
+  remote = await startRemote({ systemd: true });
+  const sshOptions = await sshIdentity(remote, true);
+  const hosts = fakeHosts();
+  const machine = remote;
+  const first = await deploy(
+    { sshPort: remote.port },
+    { sshOptions, hosts: hosts.api, answers: { "Unknown host key": "yes" } },
+  );
+  expect(first.job.status, first.job.error ?? "").toBe("succeeded");
+  const serverId = first.job.result!.serverId!;
+  const id = first.job.result!.unit!.replace(/^paseo-remote-deploy-|\.service$/gu, "");
+  expect(hosts.hosts.map((host) => host.source.key)).toEqual([`deployment:${id}`]);
+  expect(hosts.hosts[0]!.metadata["remote-deploy.deployment"]).toBe(id);
+
+  // As before deployment IDs: the same daemon saved through two names, by this plugin.
+  const home = "/home/dev/.paseo";
+  const ours = { "remote-deploy.paseoHome": home };
+  hosts.hosts.splice(0);
+  const alias = hosts.seed({
+    connection: "tcp://127.0.0.1:1",
+    label: "alias",
+    sourceKey: `deploy:alias.example:22:${home}`,
+    metadata: ours,
+    serverId,
+  });
+  const named = hosts.seed({
+    connection: "tcp://127.0.0.1:1",
+    label: "named",
+    sourceKey: deploymentSourceKey({
+      destination: "dev@127.0.0.1",
+      sshPort: remote.port,
+      paseoHome: home,
+    }),
+    metadata: ours,
+    serverId,
+  });
+  hosts.calls.splice(0);
+  const adopted = await deploy(
+    { sshPort: remote.port },
+    { sshOptions, hosts: hosts.api, answers: { "Restart the running daemon?": "restart" } },
+  );
+  expect(adopted.job.status, adopted.job.error ?? "").toBe("succeeded");
+  expect(adopted.asked).toEqual(["Restart the running daemon?"]);
+  expect(hosts.calls.map((call) => `${call.kind} ${call.registrationId}`)).toEqual([
+    `remove ${alias.registrationId}`,
+    `update ${named.registrationId}`,
+  ]);
+  expect(hosts.hosts.map((host) => host.registrationId)).toEqual([named.registrationId]);
+  expect(named.metadata["remote-deploy.deployment"]).toBe(id);
+
+  // A registration for the same daemon made by hand.
+  const manual = hosts.seed({
+    connection: "tcp://127.0.0.1:1",
+    label: "by hand",
+    sourceId: "manual",
+    serverId,
+  });
+  const record = () => machine.asDev("cat ~/.paseo/remote-deploy.json");
+  const before = await record();
+  hosts.calls.splice(0);
+  const cancelled = await deploy(
+    { sshPort: remote.port },
+    { sshOptions, hosts: hosts.api, answers: { "This daemon is already saved": "cancel" } },
+  );
+  expect(cancelled.job.status).toBe("cancelled");
+  // Asked before anything else, so nothing on the machine or in the registry changed.
+  expect(cancelled.asked).toEqual(["This daemon is already saved"]);
+  expect(cancelled.messages["This daemon is already saved"]).toMatch(
+    /already saved on this daemon as "by hand"/u,
+  );
+  expect(await record()).toBe(before);
+  expect(hosts.calls).toEqual([]);
+
+  const replaced = await deploy(
+    { sshPort: remote.port },
+    {
+      sshOptions,
+      hosts: hosts.api,
+      answers: {
+        "This daemon is already saved": "replace",
+        "Restart the running daemon?": "restart",
+      },
+    },
+  );
+  expect(replaced.job.status, replaced.job.error ?? "").toBe("succeeded");
+  expect(replaced.asked).toEqual(["This daemon is already saved", "Restart the running daemon?"]);
+  expect(hosts.calls.map((call) => `${call.kind} ${call.registrationId}`)).toEqual([
+    `remove ${manual.registrationId}`,
+    `update ${named.registrationId}`,
+  ]);
+  expect(hosts.hosts.map((host) => host.registrationId)).toEqual([named.registrationId]);
 });

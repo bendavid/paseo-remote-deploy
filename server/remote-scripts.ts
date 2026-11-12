@@ -172,6 +172,10 @@ fi
 if [ -f "$paseo_home/paseo.pid" ]; then
   say lock "$(tr -d '\r\n' < "$paseo_home/paseo.pid")"
 fi
+# The daemon's identity, kept across restarts: which saved hosts already point at this daemon.
+if [ -f "$paseo_home/server-id" ]; then
+  say serverId "$(tr -d ' \r\n' < "$paseo_home/server-id")"
+fi
 # What ConditionHost= compares, and whether it survives a reboot: with a read-only /etc, systemd
 # mounts a new machine ID over /etc/machine-id at every boot.
 if [ -r /etc/machine-id ]; then
