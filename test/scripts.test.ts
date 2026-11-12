@@ -12,7 +12,15 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { readInspection } from "../server/deploy";
-import { CHECK_RELAY, INSPECT, PROBE, RESOLVE_PASEO, SET_CRONTAB } from "../server/remote-scripts";
+import {
+  CHECK_RELAY,
+  INSPECT,
+  PROBE,
+  RESOLVE_PASEO,
+  SET_CRONTAB,
+  STOP_DAEMON,
+} from "../server/remote-scripts";
+import { renderUnit } from "../server/remote-files";
 import { cronTag, renderCronLines } from "../server/service-plan";
 
 function run(script: string, env: Record<string, string>): Map<string, string> {
@@ -100,34 +108,35 @@ describe("PROBE", () => {
   });
 });
 
+/** A fake crontab command backed by a file, so the test never touches a real crontab. */
+function fakeCrontab(initial: string | null): {
+  env: Record<string, string>;
+  read(): string | null;
+} {
+  const dir = mkdtempSync(join(tmpdir(), "rd-cron-"));
+  const file = join(dir, "crontab.txt");
+  if (initial !== null) writeFileSync(file, initial);
+  const command = join(dir, "crontab");
+  writeFileSync(
+    command,
+    [
+      "#!/bin/sh",
+      `file='${file}'`,
+      'case "$1" in',
+      '  -l) [ -f "$file" ] && cat "$file" && exit 0; echo "no crontab for $(id -un)" >&2; exit 1 ;;',
+      '  -r) rm -f "$file" ;;',
+      '  -) cat > "$file" ;;',
+      "esac",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return {
+    env: { PASEO_REMOTE_DEPLOY_CRONTAB: command },
+    read: () => (existsSync(file) ? readFileSync(file, "utf8") : null),
+  };
+}
+
 describe("SET_CRONTAB", () => {
-  /** A fake crontab command backed by a file, so the test never touches a real crontab. */
-  function fakeCrontab(initial: string | null): {
-    env: Record<string, string>;
-    read(): string | null;
-  } {
-    const dir = mkdtempSync(join(tmpdir(), "rd-cron-"));
-    const file = join(dir, "crontab.txt");
-    if (initial !== null) writeFileSync(file, initial);
-    const command = join(dir, "crontab");
-    writeFileSync(
-      command,
-      [
-        "#!/bin/sh",
-        `file='${file}'`,
-        'case "$1" in',
-        '  -l) [ -f "$file" ] && cat "$file" && exit 0; echo "no crontab for $(id -un)" >&2; exit 1 ;;',
-        '  -r) rm -f "$file" ;;',
-        '  -) cat > "$file" ;;',
-        "esac",
-      ].join("\n"),
-      { mode: 0o755 },
-    );
-    return {
-      env: { PASEO_REMOTE_DEPLOY_CRONTAB: command },
-      read: () => (existsSync(file) ? readFileSync(file, "utf8") : null),
-    };
-  }
   const tag = cronTag("paseo-daemon.service");
   const lines = renderCronLines({ schedule: "reboot", installDir: "/i", paseoHome: "/h", tag });
 
@@ -296,5 +305,106 @@ describe("RESOLVE_PASEO", () => {
     expect(() =>
       run(RESOLVE_PASEO, { INSTALL_DIR: dir, SPEC: "9.9.9", CURRENT: "0.13.0" }),
     ).toThrow();
+  });
+});
+
+describe("deployment units", () => {
+  const MACHINE = "0123456789abcdef0123456789abcdef";
+
+  function unitDir(home: string): string {
+    const dir = join(home, ".config", "systemd", "user");
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  /** A fake systemctl that logs its arguments, so tests never reach the real user manager. */
+  function fakeSystemctl(): { path: string; calls(): string[] } {
+    const dir = mkdtempSync(join(tmpdir(), "rd-systemctl-"));
+    const log = join(dir, "calls.txt");
+    writeFileSync(join(dir, "systemctl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nexit 0\n`, {
+      mode: 0o755,
+    });
+    return {
+      path: `${dir}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      calls: () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : []),
+    };
+  }
+
+  test("INSPECT sends back this plugin's units whole, and the machine ID", () => {
+    const home = mkdtempSync(join(tmpdir(), "rd-units-"));
+    const dir = unitDir(home);
+    const unit = renderUnit({
+      installDir: "/i",
+      paseoHome: `${home}/my paseo`,
+      machineId: MACHINE,
+    });
+    writeFileSync(join(dir, "paseo-remote-deploy-0123456789abcdef.service"), `${unit}\n`);
+    writeFileSync(join(dir, "paseo-daemon.service"), "[Service]\nExecStart=/x daemon run\n");
+    writeFileSync(join(dir, "other.service"), `${unit}\n`);
+    const values = run(INSPECT, { HOME: home, REQ_INSTALL_DIR: "", REQ_PASEO_HOME: "" });
+    const inspection = readInspection(values);
+    // The unit without the plugin's marker and the one under another name are not reported.
+    expect(inspection.units).toEqual([
+      {
+        name: "paseo-remote-deploy-0123456789abcdef.service",
+        home: `${home}/my paseo`,
+        machineId: MACHINE,
+      },
+    ]);
+    if (existsSync("/etc/machine-id")) {
+      expect(inspection.machineId).toBe(readFileSync("/etc/machine-id", "utf8").trim());
+    }
+  });
+
+  test("PROBE resolves another spelling of a home to the same real path", () => {
+    const home = mkdtempSync(join(tmpdir(), "rd-real-"));
+    mkdirSync(join(home, "paseo"));
+    symlinkSync(join(home, "paseo"), join(home, "link"));
+    const values = run(PROBE, {
+      PID: "",
+      WORKTREES_ROOT: "",
+      PASEO_HOME: join(home, "paseo"),
+      UNIT_HOMES: [join(home, "link"), join(home, "missing")].join("\n"),
+    });
+    expect(values.get("realHome0")).toBe(values.get("realPaseoHome"));
+    expect(values.get("realHome1")).toBe("");
+  });
+
+  test("STOP_DAEMON retires the units it is given, with their crontab lines", () => {
+    const home = mkdtempSync(join(tmpdir(), "rd-retire-"));
+    const dir = unitDir(home);
+    const old = "paseo-daemon.service";
+    const mine = "paseo-remote-deploy-0123456789abcdef.service";
+    writeFileSync(
+      join(dir, old),
+      `${renderUnit({ installDir: "/i", paseoHome: "/h", machineId: null })}\n`,
+    );
+    writeFileSync(join(dir, "foreign.service"), "[Service]\nExecStart=/bin/true\n");
+    const oldLines = renderCronLines({
+      schedule: "reboot",
+      installDir: "/i",
+      paseoHome: "/h",
+      tag: cronTag(old),
+    });
+    const crontab = fakeCrontab(`0 3 * * * backup\n${oldLines}\n`);
+    const systemctl = fakeSystemctl();
+    const values = run(STOP_DAEMON, {
+      ...crontab.env,
+      HOME: home,
+      PATH: systemctl.path,
+      INSTALL_DIR: join(home, "no-install"),
+      PASEO_HOME: "/h",
+      UNIT: mine,
+      CRON_TAG: cronTag(mine),
+      RETIRE: `${old} foreign.service not-a-unit`,
+    });
+    expect(values.get("retired")?.trim().split(" ")).toEqual([old, "foreign.service"]);
+    expect(existsSync(join(dir, old))).toBe(false);
+    // Disabled, but a unit the plugin did not write is never deleted.
+    expect(existsSync(join(dir, "foreign.service"))).toBe(true);
+    expect(crontab.read()).toBe("0 3 * * * backup\n");
+    expect(systemctl.calls()).toEqual(
+      expect.arrayContaining([`--user disable --now ${old}`, "--user daemon-reload"]),
+    );
   });
 });

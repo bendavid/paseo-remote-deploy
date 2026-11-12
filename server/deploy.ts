@@ -22,7 +22,15 @@ import { AskpassBroker, type AskpassRequest } from "./askpass";
 import { deploymentSourceKey, pairingLink, relayConnection, sshConnection } from "./connection";
 import { encodeQr } from "./qr";
 import { type NodeRelease, type RemotePlatform } from "./node-release";
-import { renderLauncher, renderUnit, unitName, type DeploymentRecord } from "./remote-files";
+import { planIdentity, type IdentityPlan } from "./deployment-identity";
+import {
+  newDeploymentId,
+  readUnit,
+  renderLauncher,
+  renderUnit,
+  type DeploymentRecord,
+  type UnitFacts,
+} from "./remote-files";
 import {
   AWAIT_DAEMON,
   CHECK_RELAY,
@@ -140,6 +148,12 @@ interface Inspection {
   previous: Partial<DeploymentRecord> | null;
   /** Whether the lock's process is alive, which PROBE reports once the lock is parsed. */
   daemonRunning: boolean;
+  /** /etc/machine-id, what ConditionHost= compares; null when missing or malformed. */
+  machineId: string | null;
+  /** The machine ID is mounted over /etc/machine-id at boot, so it changes at every boot. */
+  machineIdTransient: boolean;
+  /** This plugin's units in the user's unit directory, from any deploy and any machine. */
+  units: UnitFacts[];
 }
 
 interface HomeConfig {
@@ -242,6 +256,17 @@ export function readInspection(values: Map<string, string>): Inspection {
     },
     previous,
     daemonRunning: false,
+    machineId: /^[0-9a-f]{32}$/u.test(values.get("machineId") ?? "")
+      ? values.get("machineId")!
+      : null,
+    machineIdTransient: values.get("machineIdTransient") === "yes",
+    units: (values.get("units") ?? "")
+      .split("\u001e")
+      .filter((entry) => entry.includes("\u001f"))
+      .map((entry) => {
+        const [name = "", ...lines] = entry.split("\u001f");
+        return readUnit(name, lines.join("\n"));
+      }),
   };
 }
 
@@ -428,14 +453,31 @@ export class DeployJob {
         homeDirectory: inspected.homeDirectory,
         paseoHome: inspected.paseoHome,
       });
+      const unitHomes = inspected.units.map((candidate) => candidate.home ?? "");
       const probe = await session.run(
         PROBE,
         {
           PID: inspected.lock?.pid ? String(inspected.lock.pid) : "",
           WORKTREES_ROOT: worktrees.moves && worktrees.from ? worktrees.from : "",
+          PASEO_HOME: inspected.paseoHome,
+          UNIT_HOMES: unitHomes.join("\n"),
         },
         MINUTE,
       );
+      // Real paths, so a unit written for another spelling of this home still counts as its own.
+      const realHome = nonEmpty(probe.values.get("realPaseoHome")) ?? inspected.paseoHome;
+      const identity = planIdentity({
+        previous: inspected.previous,
+        machineId: inspected.machineId,
+        machineIdTransient: inspected.machineIdTransient,
+        units: inspected.units.map((candidate, index) => ({
+          ...candidate,
+          sameHome:
+            candidate.home !== null &&
+            (nonEmpty(probe.values.get(`realHome${index}`)) ?? candidate.home) === realHome,
+        })),
+        newId: newDeploymentId,
+      });
       const inspection: Inspection = {
         ...inspected,
         daemonRunning: probe.values.get("daemonRunning") === "yes",
@@ -461,13 +503,14 @@ export class DeployJob {
         stranded,
         describeDownloads(inspection, nodeRelease, nodePlan, versionPlan),
       );
+      if (identity.movedFrom) await this.confirmMove(inspection, identity.movedFrom);
       if (this.request.service === "systemd" && !inspection.systemd) {
         throw new DeployFailedError(
           "This machine does not run systemd. Choose Automatic or Background process.",
         );
       }
       let plan = planService(inspection.facts, this.request.service);
-      const unit = unitName(inspection.paseoHome, inspection.homeDirectory);
+      const unit = identity.unit;
       this.setStep(
         "inspect",
         "done",
@@ -509,23 +552,29 @@ export class DeployJob {
       );
 
       begin("configure");
-      if (inspection.daemonRunning || inspection.managedHome) {
-        await session.run(
+      if (inspection.daemonRunning || inspection.managedHome || identity.retire.length > 0) {
+        const stopped = await session.run(
           STOP_DAEMON,
           {
             INSTALL_DIR: inspection.installDir,
             PASEO_HOME: inspection.paseoHome,
             UNIT: unit,
             CRON_TAG: cronTag(unit),
+            RETIRE: identity.retire.join(" "),
           },
           2 * MINUTE,
         );
+        const retired = nonEmpty(stopped.values.get("retired"));
+        if (retired) this.appendLog(`Replaced the earlier units of this home: ${retired}.`);
       }
       const deployment: DeploymentRecord = {
+        id: identity.id,
         installDir: inspection.installDir,
         unit,
         connectVia: this.connectVia,
         deployedAt: new Date().toISOString(),
+        machineId: identity.pinnedMachine,
+        hostname: inspection.hostname,
       };
       const configured = await session.run(
         CONFIGURE,
@@ -567,7 +616,7 @@ export class DeployJob {
       );
 
       begin("service");
-      const started = await this.startDaemon(session, inspection, plan, unit);
+      const started = await this.startDaemon(session, inspection, plan, identity);
       plan = started.plan;
       if (plan.runAs === "cron") {
         this.setStep("service", "running", "Waiting for cron to start the daemon, up to a minute.");
@@ -884,6 +933,32 @@ export class DeployJob {
   }
 
   /**
+   * The home's record names another machine, so the home is shared with it: one daemon at a time
+   * can use a home, and moving the deployment here stops the other machine from starting it.
+   */
+  private async confirmMove(
+    inspection: Inspection,
+    from: NonNullable<IdentityPlan["movedFrom"]>,
+  ): Promise<void> {
+    const there = from.hostname ?? `the machine with ID ${from.machineId}`;
+    const choice = await this.ask({
+      kind: "choice",
+      title: "Move this deployment here?",
+      message:
+        `${inspection.paseoHome} was deployed on ${there}, and ${inspection.hostname} shares it. ` +
+        `Only one daemon can use a Paseo home. Moving the deployment to ${inspection.hostname} ` +
+        `stops ${there} from starting it.\n\nTo run a daemon on both machines, cancel and ` +
+        `choose a different Paseo home for this one.`,
+      choices: [
+        { value: "move", label: "Move it here", tone: "danger" },
+        { value: "cancel", label: "Cancel", tone: "default" },
+      ],
+    });
+    if (choice !== "move") throw new CancelledError();
+    this.warnings.push(`${inspection.paseoHome} was moved here from ${there}.`);
+  }
+
+  /**
    * A home some other setup uses: its own launcher (a desktop app, a unit, a script) would start a
    * daemon there with settings this deploy replaces, and clients using its old password stop working.
    */
@@ -964,8 +1039,9 @@ export class DeployJob {
     session: RemoteSession,
     inspection: Inspection,
     initial: ServicePlan,
-    unit: string,
+    identity: IdentityPlan,
   ): Promise<{ plan: ServicePlan; linger: string | null }> {
+    const { unit } = identity;
     let plan = initial;
     let linger: string | null = null;
     if (plan.runAs === "systemd") {
@@ -1030,6 +1106,7 @@ export class DeployJob {
           UNIT_CONTENT: renderUnit({
             installDir: inspection.installDir,
             paseoHome: inspection.paseoHome,
+            machineId: identity.pinnedMachine,
           }),
         },
         3 * MINUTE,
@@ -1047,6 +1124,20 @@ export class DeployJob {
       );
     }
     this.warnings.push(...plan.caveats);
+    if (plan.runAs === "systemd" && !identity.pinnedMachine) {
+      this.warnings.push(
+        `${unit} is not pinned to ${inspection.hostname}: ${
+          inspection.machineIdTransient
+            ? "its machine ID is created anew at every boot"
+            : "it has no machine ID"
+        }. If other machines share ${inspection.homeDirectory}, they start this daemon too.`,
+      );
+    }
+    for (const other of identity.unpinned) {
+      this.warnings.push(
+        `${other} also runs ${inspection.paseoHome} and is not pinned to a machine, so every machine sharing your systemd user units starts it. Redeploy it from the machine it belongs to, or remove it.`,
+      );
+    }
     return { plan, linger };
   }
 

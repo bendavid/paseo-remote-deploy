@@ -182,7 +182,11 @@ test("an SSH deploy saves a host that the daemon brings online over its own SSH 
   expect(host).toMatchObject({
     status: "online",
     serverId: job.result?.serverId,
-    metadata: { "remote-deploy.service": "paseo-daemon.service" },
+    metadata: {
+      "remote-deploy.service": expect.stringMatching(
+        /^paseo-remote-deploy-[0-9a-f]{16}\.service$/u,
+      ),
+    },
   });
   // Discovery never returns the credential.
   expect(JSON.stringify(directory)).not.toMatch(/password=/u);

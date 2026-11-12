@@ -391,7 +391,7 @@ test("a redeploy upgrades to the latest release, and a lower requested version d
   expect(downgrade.job.result?.paseoVersion).toBe("0.13.0-beta.2");
 
   // With the daemon stopped, a downgrade still asks; declining leaves the install as it was.
-  await remote.asDev("systemctl --user stop paseo-daemon.service");
+  await remote.asDev("systemctl --user stop 'paseo-remote-deploy-*.service'");
   const declined = await deploy(
     { sshPort: remote.port, paseoVersion: "0.13.0-beta.1" },
     { sshOptions, hosts: hosts.api, answers: { "Downgrade Paseo?": "cancel" } },
@@ -412,7 +412,7 @@ test("a redeploy moves Node.js to the pinned major and reinstalls Paseo; a lower
   const daemonExe = async () =>
     (
       await remote!.asDev(
-        "readlink -f /proc/$(systemctl --user show -p MainPID --value paseo-daemon.service)/exe",
+        "readlink -f /proc/$(systemctl --user show -p MainPID --value $(basename ~/.config/systemd/user/paseo-remote-deploy-*.service))/exe",
       )
     ).trim();
   const step = (job: { steps: { id: string; detail: string | null }[] }, id: string) =>
@@ -590,4 +590,112 @@ test("an old system Node.js ahead on PATH does not shadow the plugin's for the d
   expect(await inDaemonEnv('echo "$PATH"')).toMatch(
     /^\/home\/dev\/\.local\/share\/paseo\/current\/bin:.*\/usr\/local\/bin/u,
   );
+});
+
+test("units are named per deployment and pinned to the machine; legacy units are replaced, and a home deployed from another machine moves only after asking", async () => {
+  remote = await startRemote({ systemd: true });
+  const sshOptions = await sshIdentity(remote, true);
+  const hosts = fakeHosts();
+  const machine = remote;
+  const units = "~/.config/systemd/user";
+  const node = "~/.local/share/paseo/current/bin/node";
+  const record = async () =>
+    JSON.parse(await machine.asDev("cat ~/.paseo/remote-deploy.json")) as Record<string, unknown>;
+  const state = async (unit: string) =>
+    (
+      await machine.asDev(
+        `systemctl --user show -p ActiveState -p ConditionResult --value ${unit} | tr '\\n' ' '`,
+      )
+    ).trim();
+  const editRecord = (script: string) =>
+    machine.asDev(
+      `${node} -e 'const f = process.argv[1]; const r = require(f); ${script}; require("fs").writeFileSync(f, JSON.stringify(r))' ~/.paseo/remote-deploy.json`,
+    );
+  const machineId = (await machine.asDev("cat /etc/machine-id")).trim();
+
+  const first = await deploy(
+    { sshPort: remote.port },
+    { sshOptions, hosts: hosts.api, answers: { "Unknown host key": "yes" } },
+  );
+  expect(first.job.status, first.job.error ?? "").toBe("succeeded");
+  const firstUnit = first.job.result!.unit!;
+  expect(firstUnit).toMatch(/^paseo-remote-deploy-[0-9a-f]{16}\.service$/u);
+  expect(await state(firstUnit)).toBe("active yes");
+
+  // An earlier version's deployment: its unpinned paseo-daemon.service, and a record without an
+  // ID. Plus another unpinned unit for the same home that the record does not name.
+  await machine.asDev(
+    [
+      `systemctl --user disable --now ${firstUnit}`,
+      `sed -e '/^ConditionHost=/d' ${units}/${firstUnit} > ${units}/paseo-daemon.service`,
+      `cp ${units}/paseo-daemon.service ${units}/paseo-daemon-abcd1234.service`,
+      `rm ${units}/${firstUnit}`,
+      "systemctl --user daemon-reload",
+      "systemctl --user enable --now paseo-daemon.service",
+    ].join(" && "),
+  );
+  await editRecord(
+    'delete r.id; delete r.machineId; delete r.hostname; r.unit = "paseo-daemon.service"',
+  );
+
+  const migrated = await deploy(
+    { sshPort: remote.port },
+    { sshOptions, hosts: hosts.api, answers: { "Restart the running daemon?": "restart" } },
+  );
+  expect(migrated.job.status, migrated.job.error ?? "").toBe("succeeded");
+  const unit = migrated.job.result!.unit!;
+  expect(unit).toMatch(/^paseo-remote-deploy-[0-9a-f]{16}\.service$/u);
+  expect(await state(unit)).toBe("active yes");
+  expect(await machine.asDev(`cat ${units}/${unit}`)).toContain(`ConditionHost=${machineId}`);
+  expect(
+    await machine.asDev(`test -e ${units}/paseo-daemon.service && echo kept || echo gone`),
+  ).toMatch(/gone/u);
+  expect(await state("paseo-daemon.service")).toMatch(/^inactive/u);
+  expect(migrated.job.log.join("\n")).toMatch(
+    /Replaced the earlier units of this home: +paseo-daemon\.service/u,
+  );
+  // The unit the record did not name is left alone, with a warning.
+  expect(
+    await machine.asDev(`test -e ${units}/paseo-daemon-abcd1234.service && echo kept`),
+  ).toMatch(/kept/u);
+  expect(migrated.job.warnings.join("\n")).toMatch(
+    /paseo-daemon-abcd1234\.service also runs \/home\/dev\/\.paseo and is not pinned/u,
+  );
+  expect(await record()).toMatchObject({
+    id: unit.replace(/^paseo-remote-deploy-|\.service$/gu, ""),
+    unit,
+    machineId,
+    hostname: expect.any(String),
+  });
+  await machine.asDev(
+    `rm ${units}/paseo-daemon-abcd1234.service && systemctl --user daemon-reload`,
+  );
+
+  // As if another machine sharing this home had deployed it last: its record and its unit's pin.
+  const other = "f".repeat(32);
+  await machine.asDev(
+    `systemctl --user stop ${unit} && sed -i 's/^ConditionHost=.*/ConditionHost=${other}/' ${units}/${unit} && systemctl --user daemon-reload`,
+  );
+  await editRecord(`r.machineId = "${other}"; r.hostname = "other-node"`);
+  // systemd itself skips a unit pinned to another machine.
+  await machine.asDev(`systemctl --user start ${unit}`);
+  expect(await state(unit)).toBe("inactive no");
+
+  const declined = await deploy(
+    { sshPort: remote.port },
+    { sshOptions, hosts: hosts.api, answers: { "Move this deployment here?": "cancel" } },
+  );
+  expect(declined.job.status).toBe("cancelled");
+  expect(declined.messages["Move this deployment here?"]).toMatch(/was deployed on other-node/u);
+  expect(await state(unit)).toBe("inactive no");
+
+  const moved = await deploy(
+    { sshPort: remote.port },
+    { sshOptions, hosts: hosts.api, answers: { "Move this deployment here?": "move" } },
+  );
+  expect(moved.job.status, moved.job.error ?? "").toBe("succeeded");
+  expect(moved.job.result?.unit).toBe(unit);
+  expect(await state(unit)).toBe("active yes");
+  expect(await record()).toMatchObject({ machineId, unit });
+  expect(moved.job.warnings.join("\n")).toMatch(/was moved here from other-node/u);
 });

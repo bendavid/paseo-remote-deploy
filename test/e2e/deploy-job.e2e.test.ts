@@ -42,7 +42,7 @@ test("password login, unknown host key and no SSH key: installs, runs under syst
   expect(job.connectVia).toBe("relay");
   expect(job.result).toMatchObject({
     service: "systemd",
-    unit: "paseo-daemon.service",
+    unit: expect.stringMatching(/^paseo-remote-deploy-[0-9a-f]{16}\.service$/u),
     cron: "none",
     linger: "enabled",
     survivesLogout: true,
@@ -52,17 +52,33 @@ test("password login, unknown host key and no SSH key: installs, runs under syst
   });
   expect(job.result?.nodeVersion).toMatch(/^v24\./u);
 
-  // The unit is enabled and running under dev's user manager, from the private Node.js.
-  expect((await remote.asDev("systemctl --user is-active paseo-daemon.service")).trim()).toBe(
-    "active",
-  );
-  expect((await remote.asDev("systemctl --user is-enabled paseo-daemon.service")).trim()).toBe(
-    "enabled",
+  // The unit is enabled and running under dev's user manager, from the private Node.js, and
+  // pinned to this machine: systemd evaluated its ConditionHost= and ran it.
+  const unit = job.result!.unit!;
+  const machineId = (await remote.asDev("cat /etc/machine-id")).trim();
+  expect(await remote.asDev(`cat ~/.config/systemd/user/${unit}`)).toContain(
+    `ConditionHost=${machineId}`,
   );
   expect(
-    await remote.asDev(
-      "readlink -f /proc/$(systemctl --user show -p MainPID --value paseo-daemon.service)/exe",
-    ),
+    (
+      await remote.asDev(
+        `systemctl --user is-active ${unit}; systemctl --user is-enabled ${unit}; systemctl --user show -p ConditionResult --value ${unit}`,
+      )
+    )
+      .trim()
+      .split("\n"),
+  ).toEqual(["active", "enabled", "yes"]);
+  const record = JSON.parse(await remote.asDev("cat ~/.paseo/remote-deploy.json")) as Record<
+    string,
+    unknown
+  >;
+  expect(record).toMatchObject({
+    id: unit.replace(/^paseo-remote-deploy-|\.service$/gu, ""),
+    unit,
+    machineId,
+  });
+  expect(
+    await remote.asDev(`readlink -f /proc/$(systemctl --user show -p MainPID --value ${unit})/exe`),
   ).toMatch(
     /^\/home\/dev\/\.local\/share\/paseo\/node-v24\.[0-9.]+-linux-(x64|arm64)\/bin\/node$/mu,
   );
@@ -165,6 +181,8 @@ test("redeploying over SSH with key login restarts the daemon and updates the sa
   );
   expect(again.job.status, again.job.error ?? "").toBe("succeeded");
   expect(hosts.calls.map((call) => call.kind)).toEqual(["add", "update"]);
+  // A redeploy keeps the home's deployment ID, and with it the unit.
+  expect(again.job.result?.unit).toBe(first.job.result?.unit);
   const updated = parseHostTarget(hosts.calls.at(-1)!.connection);
   expect(updated).toMatchObject({ kind: "ssh" });
   expect(JSON.parse(await remote.asDev("cat ~/.paseo/config.json")).daemon.relay.enabled).toBe(

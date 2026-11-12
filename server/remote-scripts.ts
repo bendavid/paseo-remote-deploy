@@ -172,11 +172,28 @@ fi
 if [ -f "$paseo_home/paseo.pid" ]; then
   say lock "$(tr -d '\r\n' < "$paseo_home/paseo.pid")"
 fi
+# What ConditionHost= compares, and whether it survives a reboot: with a read-only /etc, systemd
+# mounts a new machine ID over /etc/machine-id at every boot.
+if [ -r /etc/machine-id ]; then
+  say machineId "$(tr -d ' \r\n' < /etc/machine-id)"
+  awk '$5 == "/etc/machine-id" { found = 1 } END { exit !found }' /proc/self/mountinfo 2>/dev/null \
+    && say machineIdTransient yes
+fi
+# This plugin's units, whole: unit separator between lines, record separator between units.
+config_home=$XDG_CONFIG_HOME; [ -n "$config_home" ] || config_home=$HOME/.config
+units=""
+for unit_file in "$config_home"/systemd/user/paseo-remote-deploy-*.service "$config_home"/systemd/user/paseo-daemon*.service; do
+  [ -f "$unit_file" ] && grep -q "${OWNER_MARKER}" "$unit_file" || continue
+  units="$units$(basename "$unit_file")$(printf '\037')$(tr '\n' '\037' < "$unit_file")$(printf '\036')"
+done
+say units "$units"
 `;
 
 /**
  * Inputs: PID (from the lock INSPECT sent back, or empty), WORKTREES_ROOT (a resolved root whose
- * worktrees to count, or empty). The follow-up to INSPECT once the plugin has parsed its files.
+ * worktrees to count, or empty), PASEO_HOME and UNIT_HOMES (the homes of this plugin's units, one
+ * per line), whose real paths tell which units run this home. The follow-up to INSPECT once the
+ * plugin has parsed its files.
  */
 export const PROBE = String.raw`${PRELUDE}
 if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then say daemonRunning yes; fi
@@ -184,6 +201,13 @@ if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then say daemonRunning yes; fi
 if [ -n "$WORKTREES_ROOT" ]; then
   say worktreesInRoot "$(find "$WORKTREES_ROOT" -mindepth 3 -maxdepth 3 -name .git 2>/dev/null | wc -l | tr -d ' ')"
 fi
+real() { (cd "$1" 2>/dev/null && pwd -P); }
+[ -n "$PASEO_HOME" ] && say realPaseoHome "$(real "$PASEO_HOME")"
+i=0
+printf '%s\n' "$UNIT_HOMES" | while IFS= read -r home; do
+  [ -n "$home" ] && say "realHome$i" "$(real "$home")"
+  i=$((i + 1))
+done
 `;
 
 /**
@@ -324,13 +348,34 @@ done
 `;
 
 /**
- * Inputs: INSTALL_DIR, PASEO_HOME, UNIT, CRON_TAG. Stops a daemon this plugin deployed in
- * PASEO_HOME however it runs. Its cron lines go first, so a keep-alive line cannot restart it
- * while the deploy reconfigures it; the deploy writes them again afterwards.
+ * Inputs: INSTALL_DIR, PASEO_HOME, UNIT, CRON_TAG, RETIRE (other units of this home on this
+ * machine, space-separated). Stops a daemon this plugin deployed in PASEO_HOME however it runs.
+ * Its cron lines go first, so a keep-alive line cannot restart it while the deploy reconfigures
+ * it; the deploy writes them again afterwards. Retired units go with their cron lines for good.
  */
 export const STOP_DAEMON = String.raw`${PRELUDE}${CRONTAB_FUNCTIONS}
 set_cron_lines ""
 user_bus
+config_home=$XDG_CONFIG_HOME; [ -n "$config_home" ] || config_home=$HOME/.config
+own_tag=$CRON_TAG; retired=""
+for old in $RETIRE; do
+  case "$old" in *.service) ;; *) continue ;; esac
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user disable --now "$old" >/dev/null 2>&1 || true
+    # A daemon stopped this way exits non-zero; do not leave the retired unit listed as failed.
+    systemctl --user reset-failed "$old" >/dev/null 2>&1 || true
+  fi
+  old_file="$config_home/systemd/user/$old"
+  if [ -f "$old_file" ] && grep -q "${OWNER_MARKER}" "$old_file"; then rm -f "$old_file"; fi
+  CRON_TAG="#[paseo-remote-deploy:$(basename "$old" .service)]"
+  set_cron_lines ""
+  retired="$retired $old"
+done
+CRON_TAG=$own_tag
+if [ -n "$retired" ]; then
+  say retired "$retired"
+  command -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload >/dev/null 2>&1
+fi
 if [ -n "$UNIT" ] && command -v systemctl >/dev/null 2>&1 \
   && systemctl --user is-active --quiet "$UNIT" 2>/dev/null; then
   systemctl --user stop "$UNIT" || fail "systemctl --user stop $UNIT failed."
@@ -482,6 +527,10 @@ systemctl --user enable "$UNIT" >/dev/null 2>&1 || fail "systemctl --user enable
 if ! systemctl --user restart "$UNIT"; then
   systemctl --user status "$UNIT" --no-pager 2>&1 | tail -n 15
   fail "systemctl --user restart $UNIT failed."
+fi
+# A failed condition skips the unit without failing the restart.
+if [ "$(systemctl --user show -p ConditionResult --value "$UNIT" 2>/dev/null)" = no ]; then
+  fail "systemd skipped $UNIT: its ConditionHost= does not match this machine."
 fi
 `;
 

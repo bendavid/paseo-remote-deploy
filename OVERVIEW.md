@@ -35,6 +35,8 @@ Before installing anything, the plugin checks how the machine treats your proces
 
 If the result would stop at logout or not come back after a reboot, the plugin says why and asks before installing. It only adds or removes crontab lines it marked as its own, and redeploying replaces them.
 
+Each deployment gets a random ID at its first deploy, kept in the Paseo home's `remote-deploy.json`. Its user service is `paseo-remote-deploy-<ID>.service`, and redeploying the same home reuses it. The service is pinned to the machine with `ConditionHost=` and the machine ID, so when your home directory is shared between machines, as on AFS or NFS, the other machines skip it. This needs a machine ID that survives a reboot, and the plugin warns when there is none. Redeploying replaces units for the same home left by earlier deploys on that machine, including ones from earlier versions of the plugin. If the Paseo home itself is shared and was last deployed from another machine, the plugin asks before moving the deployment.
+
 ## Settings
 
 - **Paseo home**: daemon state and config, `~/.paseo` by default. `~` is the remote home directory.

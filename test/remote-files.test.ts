@@ -3,7 +3,16 @@ import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { renderLauncher, renderUnit, systemdArgument, unitName } from "../server/remote-files";
+import {
+  DEPLOYMENT_ID,
+  deploymentUnit,
+  newDeploymentId,
+  readUnit,
+  renderLauncher,
+  renderUnit,
+  splitExecStart,
+  systemdArgument,
+} from "../server/remote-files";
 
 /** An install directory whose "node" prints its arguments and PATH instead of running Paseo. */
 function fakeInstall(): string {
@@ -59,11 +68,11 @@ describe("renderLauncher", () => {
 });
 
 describe("systemd unit", () => {
-  test("names the default home's unit paseo-daemon.service", () => {
-    expect(unitName("/home/dev/.paseo", "/home/dev")).toBe("paseo-daemon.service");
-    expect(unitName("/home/dev/work/.paseo", "/home/dev")).toMatch(
-      /^paseo-daemon-[0-9a-f]{8}\.service$/u,
-    );
+  test("is named after a random deployment ID", () => {
+    const id = newDeploymentId();
+    expect(id).toMatch(DEPLOYMENT_ID);
+    expect(newDeploymentId()).not.toBe(id);
+    expect(deploymentUnit(id)).toBe(`paseo-remote-deploy-${id}.service`);
   });
 
   test("escapes ExecStart arguments", () => {
@@ -72,15 +81,46 @@ describe("systemd unit", () => {
     expect(systemdArgument("/a$b%c")).toBe("/a$$b%%c");
   });
 
-  test("runs the launcher in the foreground", () => {
+  test("runs the launcher in the foreground, pinned to a machine when given one", () => {
     const unit = renderUnit({
       installDir: "/home/dev/.local/share/paseo",
       paseoHome: "/home/dev/.paseo",
+      machineId: "0123456789abcdef0123456789abcdef",
     });
     expect(unit).toContain(
       "ExecStart=/home/dev/.local/share/paseo/bin/paseo daemon run --home /home/dev/.paseo",
     );
+    expect(unit).toMatch(/\[Unit\]\n.*\nConditionHost=0123456789abcdef0123456789abcdef\n/u);
     expect(unit).toContain("Written by the Paseo remote-deploy plugin");
     expect(unit).toContain("WantedBy=default.target");
+    const unpinned = renderUnit({
+      installDir: "/i",
+      paseoHome: "/h",
+      machineId: null,
+    });
+    expect(unpinned).not.toContain("ConditionHost");
+  });
+
+  test("reads back the home and machine from a unit it wrote", () => {
+    for (const home of ["/home/dev/.paseo", "/pool/my paseo", '/a$b%c"d\\e', "/tab\there"]) {
+      const content = renderUnit({
+        installDir: "/opt/paseo install",
+        paseoHome: home,
+        machineId: "0123456789abcdef0123456789abcdef",
+      });
+      expect(readUnit("paseo-remote-deploy-x.service", content)).toEqual({
+        name: "paseo-remote-deploy-x.service",
+        home,
+        machineId: "0123456789abcdef0123456789abcdef",
+      });
+    }
+    // Units from before ConditionHost.
+    expect(
+      readUnit(
+        "paseo-daemon.service",
+        "[Service]\nExecStart=/i/bin/paseo daemon run --home /home/dev/.paseo\n",
+      ),
+    ).toEqual({ name: "paseo-daemon.service", home: "/home/dev/.paseo", machineId: null });
+    expect(splitExecStart('a "b c" d')).toEqual(["a", "b c", "d"]);
   });
 });
