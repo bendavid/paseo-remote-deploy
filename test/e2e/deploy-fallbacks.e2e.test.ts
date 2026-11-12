@@ -699,3 +699,28 @@ test("units are named per deployment and pinned to the machine; legacy units are
   expect(await record()).toMatchObject({ machineId, unit });
   expect(moved.job.warnings.join("\n")).toMatch(/was moved here from other-node/u);
 });
+
+test("an old Node.js folder that cannot be removed only warns, after the host is saved", async () => {
+  remote = await startRemote({ systemd: true });
+  const sshOptions = await sshIdentity(remote, true);
+  const hosts = fakeHosts();
+  const first = await deploy(
+    { sshPort: remote.port },
+    { sshOptions, hosts: hosts.api, answers: { "Unknown host key": "yes" } },
+  );
+  expect(first.job.status, first.job.error ?? "").toBe("succeeded");
+  // A leftover folder with a read-only directory in it, which rm -rf cannot empty.
+  await remote.asDev(
+    "d=~/.local/share/paseo/node-v1.0.0-linux-x64/bin && mkdir -p $d && touch $d/node && chmod 555 $d",
+  );
+  const again = await deploy(
+    { sshPort: remote.port },
+    { sshOptions, hosts: hosts.api, answers: { "Restart the running daemon?": "restart" } },
+  );
+  expect(again.job.status, again.job.error ?? "").toBe("succeeded");
+  expect(again.job.steps.find((step) => step.id === "host")?.status).toBe("done");
+  expect(hosts.calls.map((call) => call.kind)).toEqual(["add", "update"]);
+  expect(again.job.warnings.join("\n")).toMatch(
+    /Could not remove the previous Node\.js folders in \/home\/dev\/\.local\/share\/paseo: +node-v1\.0\.0-linux-x64\. They only take up space/u,
+  );
+});

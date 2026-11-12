@@ -50,3 +50,5 @@ Redeploying the same machine and home brings Node.js to the newest 24 release an
 ## Requirements and limits
 
 The plugin needs Paseo 0.13.0 or later on a Linux or macOS daemon with OpenSSH. The remote machine needs Linux with glibc, or macOS 13.5 or later, on x64 or arm64, plus internet access, `curl` or `wget`, and `tar`. Alpine and other musl systems are not supported. The plugin refuses a Paseo home used by a daemon it didn't install, or by a daemon on another machine through a shared home directory. A user service needs linger to outlive your last session, which only an administrator can enable on machines without polkit.
+
+Some filesystems, such as AFS, cannot hold Unix sockets, and Paseo's terminals then fail to start ([getpaseo/paseo#9213](https://github.com/getpaseo/paseo/issues/9213)). The plugin tests the Paseo home and, where sockets fail, puts an empty file at `terminal-worker/sock`, so Paseo uses `$TMPDIR` for the terminal socket instead. Once the home can hold sockets again, a redeploy removes the file.

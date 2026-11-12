@@ -236,13 +236,24 @@ else
 fi
 `;
 
-/** Inputs: INSTALL_DIR, NODE_URL, NODE_SHA256, NODE_DIR. Unpacks Node.js beside other versions. */
+/**
+ * Inputs: INSTALL_DIR, NODE_URL, NODE_SHA256, NODE_DIR. Unpacks Node.js beside other versions.
+ * Only the folder in use (current) is reused. Any other folder of that name was left by a deploy
+ * that did not finish, and its Paseo may be half installed: npm would take a package directory at
+ * the requested version as complete, so the folder is replaced rather than reused.
+ */
 export const INSTALL_NODE = String.raw`${PRELUDE}
 mkdir -p "$INSTALL_DIR" || fail "Could not create $INSTALL_DIR."
-if [ -x "$INSTALL_DIR/$NODE_DIR/bin/node" ]; then
+in_use=$(basename "$(readlink "$INSTALL_DIR/current" 2>/dev/null)" 2>/dev/null)
+if [ "$in_use" = "$NODE_DIR" ] && [ -x "$INSTALL_DIR/$NODE_DIR/bin/node" ]; then
   say reused yes
   say nodeVersion "$("$INSTALL_DIR/$NODE_DIR/bin/node" -v)"
   exit 0
+fi
+if [ -e "$INSTALL_DIR/$NODE_DIR" ] || [ -L "$INSTALL_DIR/$NODE_DIR" ]; then
+  echo "Removing $NODE_DIR, left by an earlier deploy that did not finish"
+  rm -rf "$INSTALL_DIR/$NODE_DIR" || fail "Could not remove the incomplete $INSTALL_DIR/$NODE_DIR."
+  say replacedLeftover yes
 fi
 tmp=$(mktemp -d "$INSTALL_DIR/.download.XXXXXX") || fail "Could not create a download directory in $INSTALL_DIR."
 trap 'rm -rf "$tmp"' EXIT
@@ -335,7 +346,9 @@ say paseoVersion "$(node -p 'require(process.argv[1]).version' "$cli/package.jso
 
 /**
  * Inputs: INSTALL_DIR, KEEP. Once the daemon runs from KEEP, removes the other Node.js folders
- * this plugin unpacked there. Earlier ones stay until then, so a failed deploy can fall back.
+ * this plugin unpacked there; they stay until then, so a failed deploy can fall back. A folder
+ * that cannot be removed is reported as pruneFailed rather than failing the step, and the next
+ * deploy tries again.
  */
 export const PRUNE_NODE = String.raw`${PRELUDE}
 [ -f "$INSTALL_DIR/.remote-deploy" ] || exit 0
@@ -343,8 +356,14 @@ for dir in "$INSTALL_DIR"/node-v*; do
   [ -d "$dir" ] || continue
   name=$(basename "$dir")
   [ "$name" = "$KEEP" ] && continue
-  rm -rf "$dir" && echo "Removed the previous Node.js folder $name"
+  if rm -rf "$dir" 2>/dev/null; then
+    echo "Removed the previous Node.js folder $name"
+  else
+    failed="$failed $name"
+  fi
 done
+[ -n "$failed" ] && say pruneFailed "$failed"
+exit 0
 `;
 
 /**
@@ -555,6 +574,59 @@ if [ "$START_NOW" = yes ]; then
   "$INSTALL_DIR/bin/paseo" daemon start --home "$PASEO_HOME" </dev/null >/dev/null 2>&1 \
     || fail "paseo daemon start failed. See $PASEO_HOME/daemon.log on the remote machine."
 fi
+`;
+
+/**
+ * Inputs: INSTALL_DIR, PASEO_HOME. Paseo's terminal worker binds a Unix socket in
+ * $PASEO_HOME/terminal-worker/sock, and does not fall back when the filesystem refuses sockets,
+ * as AFS does (getpaseo/paseo#9213). There, an empty regular file in place of that directory
+ * makes Paseo skip it for $TMPDIR/paseo-<uid>. Where sockets work, an empty file an earlier
+ * deploy left is removed, so the home goes back to Paseo's default.
+ * PASEO_REMOTE_DEPLOY_SOCKET_TEST stands in for the probe's result in tests ("ok" or an errno).
+ */
+export const TERMINAL_SOCKETS = String.raw`${PRELUDE}
+node="$INSTALL_DIR/current/bin/node"
+dir="$PASEO_HOME/terminal-worker"
+sock="$dir/sock"
+mkdir -p "$dir" && chmod 700 "$dir" || fail "Could not create $dir."
+result=$("$node" -e '
+const forced = process.env.PASEO_REMOTE_DEPLOY_SOCKET_TEST;
+if (forced) {
+  console.log(forced === "ok" ? "ok" : "error " + forced);
+} else {
+  const path = require("node:path");
+  const socket = path.join(process.argv[1], ".rd-" + process.pid + ".sock");
+  const server = require("node:net").createServer();
+  server.once("error", (error) => console.log("error " + (error.code || error.message)));
+  server.listen(socket, () => server.close(() => {
+    try { require("node:fs").unlinkSync(socket); } catch {}
+    console.log("ok");
+  }));
+}
+' "$dir" 2>&1)
+case "$result" in
+  ok)
+    say terminalSockets ok
+    if [ -f "$sock" ] && [ ! -L "$sock" ] && [ ! -s "$sock" ]; then
+      rm -f "$sock" && say terminalSocketWorkaround removed
+    fi
+    ;;
+  "error EPERM"|"error EACCES"|"error EOPNOTSUPP"|"error ENOTSUP")
+    say terminalSockets "$(printf '%s' "$result" | sed 's/^error //')"
+    if [ -d "$sock" ] && [ ! -L "$sock" ]; then
+      rmdir "$sock" 2>/dev/null \
+        || fail "$sock is not empty, and Paseo would try to bind its terminal socket there."
+    fi
+    if [ ! -e "$sock" ] && [ ! -L "$sock" ]; then
+      : > "$sock" && chmod 600 "$sock" || fail "Could not create $sock."
+    fi
+    say terminalSocketWorkaround applied
+    ;;
+  *)
+    say terminalSockets "unknown"
+    say terminalSocketError "$(printf '%s' "$result" | head -n 1)"
+    ;;
+esac
 `;
 
 /** Inputs: CRON_TAG, CRON_LINES (empty to remove this deployment's lines). */

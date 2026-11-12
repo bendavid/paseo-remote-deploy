@@ -1,10 +1,14 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -15,10 +19,13 @@ import { readInspection } from "../server/deploy";
 import {
   CHECK_RELAY,
   INSPECT,
+  INSTALL_NODE,
   PROBE,
+  PRUNE_NODE,
   RESOLVE_PASEO,
   SET_CRONTAB,
   STOP_DAEMON,
+  TERMINAL_SOCKETS,
 } from "../server/remote-scripts";
 import { renderUnit } from "../server/remote-files";
 import { cronTag, renderCronLines } from "../server/service-plan";
@@ -406,5 +413,160 @@ describe("deployment units", () => {
     expect(systemctl.calls()).toEqual(
       expect.arrayContaining([`--user disable --now ${old}`, "--user daemon-reload"]),
     );
+  });
+});
+
+describe("TERMINAL_SOCKETS", () => {
+  /** A Paseo home and an install directory whose node is the one running these tests. */
+  function setup() {
+    const root = mkdtempSync(join(tmpdir(), "rd-sock-"));
+    mkdirSync(join(root, "install", "current", "bin"), { recursive: true });
+    symlinkSync(process.execPath, join(root, "install", "current", "bin", "node"));
+    const home = join(root, "home");
+    mkdirSync(home);
+    const sock = join(home, "terminal-worker", "sock");
+    const env = { INSTALL_DIR: join(root, "install"), PASEO_HOME: home };
+    return { home, sock, env };
+  }
+
+  test("binds a real test socket where the filesystem allows it, and leaves the directory alone", () => {
+    const { sock, env } = setup();
+    mkdirSync(sock, { recursive: true, mode: 0o700 });
+    const values = run(TERMINAL_SOCKETS, env);
+    expect(values.get("terminalSockets")).toBe("ok");
+    expect(values.has("terminalSocketWorkaround")).toBe(false);
+    expect(statSync(sock).isDirectory()).toBe(true);
+    // The probe cleans up after itself.
+    expect(readdirSync(join(sock, ".."))).toEqual(["sock"]);
+  });
+
+  test("where sockets cannot be bound, an empty file replaces the empty directory", () => {
+    for (const code of ["EPERM", "EACCES", "EOPNOTSUPP", "ENOTSUP"]) {
+      const { sock, env } = setup();
+      mkdirSync(sock, { recursive: true, mode: 0o700 });
+      const values = run(TERMINAL_SOCKETS, { ...env, PASEO_REMOTE_DEPLOY_SOCKET_TEST: code });
+      expect(values.get("terminalSockets")).toBe(code);
+      expect(values.get("terminalSocketWorkaround")).toBe("applied");
+      expect(statSync(sock).isFile()).toBe(true);
+      expect(statSync(sock).size).toBe(0);
+    }
+    // A fresh home gets the file too, and a second deploy keeps it.
+    const { sock, env } = setup();
+    const forced = { ...env, PASEO_REMOTE_DEPLOY_SOCKET_TEST: "EPERM" };
+    expect(run(TERMINAL_SOCKETS, forced).get("terminalSocketWorkaround")).toBe("applied");
+    expect(run(TERMINAL_SOCKETS, forced).get("terminalSocketWorkaround")).toBe("applied");
+    expect(statSync(sock).isFile()).toBe(true);
+  });
+
+  test("once sockets work, the empty file goes; a file with content is never removed", () => {
+    const { sock, env } = setup();
+    run(TERMINAL_SOCKETS, { ...env, PASEO_REMOTE_DEPLOY_SOCKET_TEST: "EPERM" });
+    const values = run(TERMINAL_SOCKETS, env);
+    expect(values.get("terminalSocketWorkaround")).toBe("removed");
+    expect(existsSync(sock)).toBe(false);
+    writeFileSync(sock, "not ours");
+    expect(run(TERMINAL_SOCKETS, env).has("terminalSocketWorkaround")).toBe(false);
+    expect(readFileSync(sock, "utf8")).toBe("not ours");
+  });
+
+  test("a socket directory with files in it fails the step instead of being removed", () => {
+    const { sock, env } = setup();
+    mkdirSync(sock, { recursive: true });
+    writeFileSync(join(sock, "keep"), "");
+    expect(() =>
+      run(TERMINAL_SOCKETS, { ...env, PASEO_REMOTE_DEPLOY_SOCKET_TEST: "EPERM" }),
+    ).toThrow();
+    expect(existsSync(join(sock, "keep"))).toBe(true);
+  });
+
+  test("other errors change nothing and are reported", () => {
+    const { sock, env } = setup();
+    const values = run(TERMINAL_SOCKETS, {
+      ...env,
+      PASEO_REMOTE_DEPLOY_SOCKET_TEST: "ENAMETOOLONG",
+    });
+    expect(values.get("terminalSockets")).toBe("unknown");
+    expect(values.get("terminalSocketError")).toBe("error ENAMETOOLONG");
+    expect(existsSync(sock)).toBe(false);
+  });
+});
+
+describe("Node.js folders", () => {
+  const NODE_DIR = "node-v99.0.0-linux-x64";
+
+  /** A Node.js release with a stand-in node, served from a file:// URL that curl accepts. */
+  function fakeRelease(): { url: string; sha256: string } {
+    const dir = mkdtempSync(join(tmpdir(), "rd-release-"));
+    mkdirSync(join(dir, NODE_DIR, "bin"), { recursive: true });
+    writeFileSync(join(dir, NODE_DIR, "bin", "node"), "#!/bin/sh\necho v99.0.0\n", { mode: 0o755 });
+    execFileSync("tar", ["-czf", join(dir, "node.tar.gz"), "-C", dir, NODE_DIR]);
+    const sha256 = createHash("sha256")
+      .update(readFileSync(join(dir, "node.tar.gz")))
+      .digest("hex");
+    return { url: `file://${join(dir, "node.tar.gz")}`, sha256 };
+  }
+
+  function installEnv(installDir: string) {
+    const release = fakeRelease();
+    return {
+      INSTALL_DIR: installDir,
+      NODE_URL: release.url,
+      NODE_SHA256: release.sha256,
+      NODE_DIR,
+    };
+  }
+
+  test("INSTALL_NODE replaces a folder an unfinished deploy left, instead of reusing it", () => {
+    const install = mkdtempSync(join(tmpdir(), "rd-install-"));
+    // As a cancelled deploy leaves it: a working node and a half-installed Paseo.
+    mkdirSync(join(install, NODE_DIR, "bin"), { recursive: true });
+    writeFileSync(join(install, NODE_DIR, "bin", "node"), "#!/bin/sh\necho v99.0.0\n", {
+      mode: 0o755,
+    });
+    mkdirSync(join(install, NODE_DIR, "lib", "node_modules", "@getpaseo", "cli"), {
+      recursive: true,
+    });
+    writeFileSync(
+      join(install, NODE_DIR, "lib", "node_modules", "@getpaseo", "cli", "package.json"),
+      "{}",
+    );
+    const values = run(INSTALL_NODE, installEnv(install));
+    expect(values.get("replacedLeftover")).toBe("yes");
+    expect(values.has("reused")).toBe(false);
+    expect(values.get("nodeVersion")).toBe("v99.0.0");
+    expect(existsSync(join(install, NODE_DIR, "lib"))).toBe(false);
+  });
+
+  test("INSTALL_NODE reuses the folder in use", () => {
+    const install = mkdtempSync(join(tmpdir(), "rd-install-"));
+    mkdirSync(join(install, NODE_DIR, "bin"), { recursive: true });
+    writeFileSync(join(install, NODE_DIR, "bin", "node"), "#!/bin/sh\necho v99.0.0\n", {
+      mode: 0o755,
+    });
+    writeFileSync(join(install, NODE_DIR, "keep"), "");
+    symlinkSync(NODE_DIR, join(install, "current"));
+    const values = run(INSTALL_NODE, installEnv(install));
+    expect(values.get("reused")).toBe("yes");
+    expect(existsSync(join(install, NODE_DIR, "keep"))).toBe(true);
+  });
+
+  test("PRUNE_NODE reports a folder it cannot remove instead of failing", () => {
+    const install = mkdtempSync(join(tmpdir(), "rd-prune-"));
+    writeFileSync(join(install, ".remote-deploy"), "");
+    for (const name of [NODE_DIR, "node-v1.0.0-linux-x64", "node-v2.0.0-linux-x64"]) {
+      mkdirSync(join(install, name, "bin"), { recursive: true });
+    }
+    // A read-only directory with a file in it cannot be emptied.
+    const stuck = join(install, "node-v2.0.0-linux-x64", "bin");
+    writeFileSync(join(stuck, "node"), "");
+    chmodSync(stuck, 0o555);
+    try {
+      const values = run(PRUNE_NODE, { INSTALL_DIR: install, KEEP: NODE_DIR });
+      expect(values.get("pruneFailed")?.trim()).toBe("node-v2.0.0-linux-x64");
+      expect(existsSync(join(install, "node-v1.0.0-linux-x64"))).toBe(false);
+      expect(existsSync(join(install, NODE_DIR))).toBe(true);
+    } finally {
+      chmodSync(stuck, 0o755);
+    }
   });
 });

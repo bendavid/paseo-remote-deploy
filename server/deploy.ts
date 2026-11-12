@@ -46,6 +46,7 @@ import {
   START_DETACHED,
   START_SYSTEMD,
   STOP_DAEMON,
+  TERMINAL_SOCKETS,
 } from "./remote-scripts";
 import {
   describeInstall,
@@ -599,6 +600,26 @@ export class DeployJob {
       if (!/^[A-Za-z0-9_-]{32}$/u.test(password)) {
         throw new DeployFailedError("The remote machine did not report a daemon password.");
       }
+      const sockets = await session.run(
+        TERMINAL_SOCKETS,
+        { INSTALL_DIR: inspection.installDir, PASEO_HOME: inspection.paseoHome },
+        MINUTE,
+      );
+      const socketSupport = sockets.values.get("terminalSockets") ?? "unknown";
+      const socketWorkaround = sockets.values.get("terminalSocketWorkaround");
+      if (socketSupport === "unknown") {
+        this.appendLog(
+          `Could not tell whether ${inspection.paseoHome} can hold Unix sockets: ${sockets.values.get("terminalSocketError") ?? "no answer"}.`,
+        );
+      } else if (socketWorkaround === "applied") {
+        this.appendLog(
+          `${inspection.paseoHome} cannot hold Unix sockets (${socketSupport}), so terminal-worker/sock is an empty file and Paseo puts its terminal socket in $TMPDIR (getpaseo/paseo#9213).`,
+        );
+      } else if (socketWorkaround === "removed") {
+        this.appendLog(
+          `${inspection.paseoHome} holds Unix sockets now, so the terminal socket goes back to terminal-worker/sock.`,
+        );
+      }
       const daemonPort = Number(configured.values.get("port"));
       if (!Number.isInteger(daemonPort) || daemonPort < 1) {
         throw new DeployFailedError("The remote machine did not report a daemon port.");
@@ -612,7 +633,11 @@ export class DeployJob {
             : relay
               ? `, relay ${relay.endpoint}${relay.publicEndpoint ? ` (clients use ${relay.publicEndpoint})` : ""}`
               : ", Paseo's relay"
-        }. Worktrees go in ${worktrees.root}.`,
+        }. Worktrees go in ${worktrees.root}.${
+          socketWorkaround === "applied"
+            ? ` Terminal sockets go in $TMPDIR, as this filesystem refuses Unix sockets (${socketSupport}).`
+            : ""
+        }`,
       );
 
       begin("service");
@@ -631,16 +656,12 @@ export class DeployJob {
         5 * MINUTE,
       );
       const serverId = nonEmpty(ready.values.get("serverId"));
-      // The daemon runs from the new Node.js folder now, so earlier ones can go.
-      await session.run(PRUNE_NODE, { INSTALL_DIR: inspection.installDir, KEEP: nodeDir }, MINUTE);
       const sessionBound = this.checkSessionBound(plan, inspection, ready.values.get("cgroup"));
       this.setStep(
         "service",
         plan.caveats.length > 0 || started.linger === "failed" || sessionBound ? "warning" : "done",
         `${describePlan(plan, unit)}. Paseo ${ready.values.get("daemonVersion") ?? paseoVersion} running${serverId ? ` as ${serverId}` : ""}.`,
       );
-      session.close();
-      session = null;
 
       begin("host");
       const label = this.request.label ?? defaultLabel(this.request.destination);
@@ -662,6 +683,11 @@ export class DeployJob {
         this.pairingLink = pairingLink(relayTarget, nonEmpty(ready.values.get("pairingUrl")));
       }
       const status = await this.waitForHost(saved.registrationId);
+      // Housekeeping comes last, once the host is saved with the new password: however it ends,
+      // the deployment works.
+      await this.pruneNode(session, inspection, nodeDir);
+      session.close();
+      session = null;
       this.result = {
         connectVia: this.connectVia,
         label,
@@ -1002,7 +1028,7 @@ export class DeployJob {
 
   /**
    * Unpacks the planned Node.js next to any earlier one; INSTALL_PASEO then reinstalls Paseo into
-   * it and switches `current`. Earlier folders stay until the daemon runs (PRUNE_NODE).
+   * it and switches `current`. Earlier folders stay until the host is saved (pruneNode).
    */
   private async installNode(
     session: RemoteSession,
@@ -1028,6 +1054,36 @@ export class DeployJob {
     const nodeVersion = installed.values.get("nodeVersion") ?? release.version;
     this.setStep("node", "done", describeNodeInstall(plan, release.directory));
     return { nodeDir: release.directory, nodeVersion };
+  }
+
+  /**
+   * Removes the Node.js folders the daemon no longer runs from. On AFS this can take minutes; a
+   * folder that will not go, a timeout or a dropped connection only leaves a warning.
+   */
+  private async pruneNode(
+    session: RemoteSession,
+    inspection: Inspection,
+    keep: string,
+  ): Promise<void> {
+    const later = "They only take up space, and the next deploy tries again.";
+    try {
+      const pruned = await session.run(
+        PRUNE_NODE,
+        { INSTALL_DIR: inspection.installDir, KEEP: keep },
+        5 * MINUTE,
+      );
+      const failed = nonEmpty(pruned.values.get("pruneFailed"));
+      if (failed) {
+        this.warnings.push(
+          `Could not remove the previous Node.js folders in ${inspection.installDir}: ${failed}. ${later}`,
+        );
+      }
+    } catch (error) {
+      if (this.abort.signal.aborted) return;
+      this.warnings.push(
+        `Removing the previous Node.js folders in ${inspection.installDir} did not finish: ${messageOf(error)} ${later}`,
+      );
+    }
   }
 
   /**
