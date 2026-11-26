@@ -4,8 +4,9 @@ import { OWNER_MARKER } from "./remote-scripts";
 
 /**
  * `<installDir>/bin/paseo`: runs the CLI with the plugin's Node.js. The daemon's agents inherit
- * its environment, so the launcher first re-enters the user's login shell to pick up their PATH,
- * then puts Paseo's Node.js directory first. Everything the daemon starts by name runs on it:
+ * its environment, so the launcher first re-enters the user's login shell, with the PATH of an
+ * interactive login shell when one prints it within 10 seconds, then puts Paseo's Node.js
+ * directory first. Everything the daemon starts by name runs on it:
  * `paseo` and `npm` are `#!/usr/bin/env node` scripts, so behind an older system `node` the CLI
  * that plugins call and the daemon's self-update would fail. Agents and terminals get that
  * Node.js first too, unless their shell's startup files reorder PATH.
@@ -26,10 +27,28 @@ export function renderLauncher(installDir: string): string {
     '  [ -n "$shell" ] || shell=$SHELL',
     '  case "$(basename "$shell" 2>/dev/null)" in',
     // Shells that take `-l -c script arg0 args`; fish and csh read positional arguments differently.
-    '    bash|zsh|ksh|mksh|dash|sh) exec "$shell" -l -c \'exec "$0" "$@"\' "$0" "$@" ;;',
+    "    bash|zsh|ksh|mksh|dash|sh)",
+    // A terminal's caller already has its interactive PATH, and a backgrounded interactive shell
+    // there could stop on the terminal, so only a caller without one asks for it.
+    "      if [ ! -t 0 ] && probe=$(mktemp 2>/dev/null); then",
+    // Installers such as Claude Code's often add to PATH only in ~/.zshrc or ~/.bashrc, which a
+    // non-interactive login shell skips. The output goes to a file, not a pipe, so a process the
+    // startup files leave running cannot hold the launcher, and a shell that hangs is killed.
+    '        "$shell" -i -l -c \'printf "\\n__PASEO_PATH__=%s\\n" "$PATH"\' </dev/null >"$probe" 2>/dev/null &',
+    "        pid=$!",
+    '        ( sleep 10; kill -9 "$pid" ) </dev/null >/dev/null 2>&1 &',
+    "        killer=$!",
+    '        wait "$pid" 2>/dev/null',
+    '        kill "$killer" 2>/dev/null',
+    "        PASEO_REMOTE_DEPLOY_PATH=$(sed -n 's/^__PASEO_PATH__=//p' \"$probe\" | tail -n 1)",
+    '        rm -f "$probe"',
+    "        export PASEO_REMOTE_DEPLOY_PATH",
+    "      fi",
+    '      exec "$shell" -l -c \'exec "$0" "$@"\' "$0" "$@" ;;',
     "  esac",
     "fi",
-    "unset PASEO_REMOTE_DEPLOY_LOGIN",
+    'if [ -n "$PASEO_REMOTE_DEPLOY_PATH" ]; then PATH=$PASEO_REMOTE_DEPLOY_PATH; fi',
+    "unset PASEO_REMOTE_DEPLOY_LOGIN PASEO_REMOTE_DEPLOY_PATH",
     'if [ -n "$PATH" ]; then PATH="$install_dir/current/bin:$PATH"; else PATH="$install_dir/current/bin"; fi',
     "export PATH",
     'exec "$install_dir/current/bin/node" "$install_dir/current/lib/node_modules/@getpaseo/cli/bin/paseo" "$@"',
