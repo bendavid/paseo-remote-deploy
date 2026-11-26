@@ -5,6 +5,7 @@ import {
   SettingsAction,
   SettingsCard,
   SettingsInput,
+  type SettingsInputHandle,
   SettingsRow,
   SettingsSection,
   SettingsSelect,
@@ -101,13 +102,26 @@ export function DeployScreen({ theme, layout, host }: PluginScreenProps) {
     [theme, layout.compact],
   );
 
+  // The inputs are uncontrolled, and onChangeText can trail the text on screen, for example while
+  // an input method is composing. Deploy reads each field back from its input.
+  const inputs = useRef<Partial<Record<DeployFormField, SettingsInputHandle | null>>>({});
+  const inputRef = (field: DeployFormField) => (handle: SettingsInputHandle | null) => {
+    inputs.current[field] = handle;
+  };
+
   const set = <Field extends DeployFormField>(field: Field, value: DeployForm[Field]) => {
     setForm((current) => ({ ...current, [field]: value }));
     setErrors((current) => (current[field] ? { ...current, [field]: undefined } : current));
   };
 
   const submit = async () => {
-    const parsed = parseDeployForm(form);
+    const typed: Partial<DeployForm> = {};
+    for (const [field, handle] of Object.entries(inputs.current)) {
+      if (handle) Object.assign(typed, { [field]: handle.getText() });
+    }
+    const current = { ...form, ...typed };
+    setForm(current);
+    const parsed = parseDeployForm(current);
     if (!parsed.ok) {
       setErrors(parsed.errors);
       return;
@@ -151,6 +165,7 @@ export function DeployScreen({ theme, layout, host }: PluginScreenProps) {
           <SettingsSection title="Machine">
             <SettingsCard>
               <SettingsInput
+                ref={inputRef("destination")}
                 label="SSH destination"
                 hint="user@host, or a Host alias from ~/.ssh/config."
                 placeholder="dev@build-box"
@@ -159,6 +174,7 @@ export function DeployScreen({ theme, layout, host }: PluginScreenProps) {
                 error={errors.destination}
               />
               <SettingsInput
+                ref={inputRef("sshPort")}
                 label="SSH port"
                 placeholder="22"
                 initialValue={form.sshPort}
@@ -166,6 +182,7 @@ export function DeployScreen({ theme, layout, host }: PluginScreenProps) {
                 error={errors.sshPort}
               />
               <SettingsInput
+                ref={inputRef("label")}
                 label="Label"
                 placeholder={form.destination.trim() ? defaultLabel(form.destination) : "Host name"}
                 initialValue={form.label}
@@ -198,6 +215,7 @@ export function DeployScreen({ theme, layout, host }: PluginScreenProps) {
               ) : null}
               {relayOn ? (
                 <SettingsInput
+                  ref={inputRef("relayEndpoint")}
                   label="Relay address"
                   hint="host:port of a relay you run, such as getpaseo/paseo-relay. Empty uses Paseo's relay. Traffic stays end-to-end encrypted either way."
                   placeholder="relay.paseo.sh:443"
@@ -216,6 +234,7 @@ export function DeployScreen({ theme, layout, host }: PluginScreenProps) {
               ) : null}
               {relayOn && form.relayEndpoint.trim() ? (
                 <SettingsInput
+                  ref={inputRef("relayPublicEndpoint")}
                   label="Public relay address"
                   hint="Optional. The address clients use, when it differs from the one the remote machine uses."
                   placeholder="Same as the relay address"
@@ -237,6 +256,7 @@ export function DeployScreen({ theme, layout, host }: PluginScreenProps) {
           <SettingsSection title="Installation">
             <SettingsCard>
               <SettingsInput
+                ref={inputRef("paseoHome")}
                 label="Paseo home"
                 hint="Daemon state, config and logs. ~ is the remote home directory."
                 placeholder="~/.paseo"
@@ -245,6 +265,7 @@ export function DeployScreen({ theme, layout, host }: PluginScreenProps) {
                 error={errors.paseoHome}
               />
               <SettingsInput
+                ref={inputRef("installDir")}
                 label="Install directory"
                 hint="Node.js and Paseo, kept separate from the Paseo home."
                 placeholder="~/.local/share/paseo"
@@ -253,6 +274,7 @@ export function DeployScreen({ theme, layout, host }: PluginScreenProps) {
                 error={errors.installDir}
               />
               <SettingsInput
+                ref={inputRef("worktreesRoot")}
                 label="Worktree root"
                 hint="Where agents' git worktrees go, saved to Paseo's worktrees.root as entered: ~ is the remote home and a relative path is inside the Paseo home. Empty uses Paseo's default, worktrees in the Paseo home. A redeploy that changes or removes an earlier setting asks first; existing worktrees stay where they are."
                 placeholder="Paseo's default"
@@ -268,6 +290,7 @@ export function DeployScreen({ theme, layout, host }: PluginScreenProps) {
                 onValueChange={(value) => set("service", value)}
               />
               <SettingsInput
+                ref={inputRef("daemonPort")}
                 label="Daemon port"
                 hint="Loopback port on the remote machine. Empty keeps an earlier deploy's port, else uses 6767 when free."
                 placeholder="Automatic"
@@ -276,6 +299,7 @@ export function DeployScreen({ theme, layout, host }: PluginScreenProps) {
                 error={errors.daemonPort}
               />
               <SettingsInput
+                ref={inputRef("paseoVersion")}
                 label="Paseo version"
                 hint="Empty installs the latest release, and a redeploy upgrades to it. A version lower than the installed one downgrades, after a warning."
                 placeholder="latest"

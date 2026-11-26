@@ -65,6 +65,50 @@ describe("renderLauncher", () => {
     });
     expect(env).not.toContain("PASEO_REMOTE_DEPLOY_LOGIN");
   });
+
+  // Claude Code's installer, for one, adds ~/.local/bin to PATH only in ~/.zshrc or ~/.bashrc.
+  const interactiveHome = (rc: string): string => {
+    const home = mkdtempSync(join(tmpdir(), "rd-home-"));
+    for (const profile of [".profile", ".zprofile"]) {
+      writeFileSync(join(home, profile), 'PATH="/opt/from-profile:$PATH"; export PATH\n');
+    }
+    // As distributions ship it: a login bash reads .bash_profile, which reads .bashrc.
+    writeFileSync(
+      join(home, ".bash_profile"),
+      'PATH="/opt/from-profile:$PATH"; export PATH\n. "$HOME/.bashrc"\n',
+    );
+    for (const file of [".bashrc", ".zshrc"]) writeFileSync(join(home, file), rc);
+    return home;
+  };
+  const pathOf = (output: string) => /\|PATH=(.*)\n$/u.exec(output)?.[1];
+
+  test("takes PATH from an interactive login shell, where rc files add to it", () => {
+    const dir = fakeInstall();
+    const home = interactiveHome('PATH="/opt/from-rc:$PATH"; export PATH\necho chatty rc\n');
+    const output = execFileSync(join(dir, "bin", "paseo"), ["--version"], {
+      env: { PATH: "/usr/bin:/bin", HOME: home, SHELL: "/bin/sh" },
+      encoding: "utf8",
+    });
+    const path = pathOf(output)!.split(":");
+    expect(path[0]).toBe(`${dir}/current/bin`);
+    expect(path).toContain("/opt/from-rc");
+    expect(path).toContain("/opt/from-profile");
+    expect(output).not.toContain("chatty rc");
+    expect(output).not.toContain("PASEO_REMOTE_DEPLOY");
+  });
+
+  test("keeps the login PATH when the interactive shell prints none", () => {
+    const dir = fakeInstall();
+    const home = interactiveHome("exit 3\n");
+    const output = execFileSync(join(dir, "bin", "paseo"), ["--version"], {
+      env: { PATH: "/usr/bin:/bin", HOME: home, SHELL: "/bin/sh" },
+      encoding: "utf8",
+    });
+    expect(pathOf(output)!.split(":").slice(0, 2)).toEqual([
+      `${dir}/current/bin`,
+      "/opt/from-profile",
+    ]);
+  });
 });
 
 describe("systemd unit", () => {
